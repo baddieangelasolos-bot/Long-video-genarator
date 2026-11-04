@@ -227,7 +227,11 @@ class Mechanic:
                 ev=kind if kind in ('failure','success') else 'success'
                 r=requests.post(u,json=dict(token=tok,event=ev,step=subject,message=body[-3800:],url=os.environ.get('OUTPUT_URL','')),timeout=30); j=r.json()
                 sent.append('apps-script:ok' if j.get('ok') else f"apps-script:rejected({j.get('error')})")
-            except Exception as e: sent.append(f'apps-script:unreachable({type(e).__name__})')
+            except Exception as e:
+                snip=''
+                try: snip=f' HTTP {r.status_code} body[:80]={r.text[:80]!r}'
+                except Exception: pass
+                sent.append(f'apps-script:unreachable({type(e).__name__}{snip})')
         if os.environ.get('MAIL_USER') and os.environ.get('MAIL_APP_PASSWORD') and os.environ.get('MAIL_TO') and not any(x.endswith(':ok') for x in sent):
             try:
                 m=EmailMessage(); m['Subject']=subject; m['From']=os.environ['MAIL_USER']; m['To']=os.environ['MAIL_TO']; m.set_content(body)
@@ -246,3 +250,4 @@ class Mechanic:
         if s.proposals: L+=['','REJECTED / UNAPPLIED PATCH IDEAS (need your review): '+', '.join(s.proposals)]
         L+=['','STAGE TIMINGS:']+[f" - {x['name']}: {x['seconds']}s, attempts {x['attempts']}, {'ok' if x['ok'] else ('skipped' if x.get('skipped') else 'FAILED')}" for x in s.stages]
         return '\n'.join(L)
+             
