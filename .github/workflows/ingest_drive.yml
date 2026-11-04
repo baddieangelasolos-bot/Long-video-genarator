@@ -1,80 +1,132 @@
 name: ingest-drive
-# Copies the 5 project files from Google Drive into a GitHub Release, byte-for-byte (no re-encoding).
-# Run manually: Actions tab > ingest-drive > Run workflow.
+# FULL PIPELINE (Mode B). Same name/inputs as the old relay, so autonomy/trigger_ingest.py keeps working unchanged.
+# Claude only fires the trigger; this runner downloads the media from Drive, builds the video, self-heals, exports and emails.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to create (an existing release with this tag is replaced)
+        description: Release tag used for the fallback copy of the output
         default: v1.0.0
-        required: true
+        required: false
+      files_json:
+        description: 'Optional JSON [[name, driveFileId, bytes], ...]. Empty = built-in 5 files'
+        default: ''
+        required: false
+      purge_all:
+        description: 'true = delete ALL old releases/tags/assets first (clean slate)'
+        default: 'true'
+        required: false
+  repository_dispatch:
+    types: [ingest-media]
 permissions:
   contents: write
+concurrency:
+  group: ingest-drive
+  cancel-in-progress: false
 jobs:
-  relay:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     env:
-      TAG: ${{ inputs.tag }}
+      TAG: ${{ inputs.tag || github.event.client_payload.tag || 'v1.0.0' }}
+      PURGE_ALL: ${{ inputs.purge_all || github.event.client_payload.purge_all || 'true' }}
+      RELAY_FILES_JSON: ${{ inputs.files_json || (github.event.client_payload.files && toJSON(github.event.client_payload.files)) || '' }}
       GH_TOKEN: ${{ github.token }}
+      WORK_DIR: /home/claude/work
+      SRC_DIR: /home/claude/work/src
+      PIPE_DIR: ${{ github.workspace }}/pipeline
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+      WEBHOOK_TOKEN: ${{ secrets.WEBHOOK_TOKEN }}
+      MAIL_USER: ${{ secrets.MAIL_USER }}
+      MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
+      MAIL_TO: ${{ secrets.MAIL_TO }}
+      PLAYER_NAME: ${{ vars.PLAYER_NAME || 'LAMINE YAMAL' }}
+      CLUB_NAME: ${{ vars.CLUB_NAME || 'FC BARCELONA' }}
+      USE_AI: ${{ vars.USE_AI || '1' }}
     steps:
+      - uses: actions/checkout@v4
+      - name: Validate inputs
+        run: |
+          [[ "$TAG" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { echo "bad tag"; exit 1; }
+          [[ "$PURGE_ALL" == "true" || "$PURGE_ALL" == "false" ]] || { echo "purge_all must be true/false"; exit 1; }
+      - name: Clean slate (old releases, assets, tags)
+        run: |
+          set -euo pipefail
+          if [ "$PURGE_ALL" = "true" ]; then
+            for t in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName'); do
+              echo "deleting release $t"
+              gh release delete "$t" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY"
+            done
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install gdown
-        run: pip install gdown
-      - name: Download from Drive, verify size, write manifest
+          cache: pip
+      - name: System tools
         run: |
-          cat > relay_fetch.py <<'PY'
-          import json, os, sys, time, hashlib
-          import gdown
-          DEFAULT = [
-              ["gal.mp4",   "1h5Q1aHNXMWDBo_qR-Kmp5OpTZqtHBrwF", 125795124],
-              ["dor.mp4",   "11WovlOWIZbhjTZBwbIPFd3U5SWG3Uvid", 273754662],
-              ["rma.mp4",   "1zl87D_E0h5ogGCUINr_29ivNmZxr7Pp2", 344812952],
-              ["music.m4a", "1XaLWyDqyGj-wTlgB04Sxv7j9oKTrF5hc", 2612210],
-              ["ref.mp4",   "13D83SMPio2H9LWn4vWeI0ZBYJaXvWkbZ", 35303250],
-          ]
-          FILES = json.loads(os.environ["RELAY_FILES_JSON"]) if os.environ.get("RELAY_FILES_JSON") else DEFAULT
-          def sha256(path):
-              h = hashlib.sha256()
-              with open(path, "rb") as f:
-                  for block in iter(lambda: f.read(1 << 20), b""):
-                      h.update(block)
-              return h.hexdigest()
-          manifest = {"created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "files": {}}
-          failed = []
-          for name, fid, size in FILES:
-              ok = False
-              for attempt in range(1, 6):
-                  if os.path.exists(name):
-                      os.remove(name)
-                  try:
-                      gdown.download(id=fid, output=name, quiet=True, resume=False)
-                  except Exception as e:
-                      print(name, "attempt", attempt, "error:", type(e).__name__, str(e)[:200], flush=True)
-                  got = os.path.getsize(name) if os.path.exists(name) else 0
-                  if got == size:
-                      ok = True
-                      break
-                  print(name, "size", got, "expected", size, "attempt", attempt,
-                        "(HTML quota/permission page? check sharing = Anyone with the link)", flush=True)
-                  time.sleep(float(os.environ.get("RELAY_RETRY_SLEEP", "20")) * attempt)
-              if not ok:
-                  failed.append(name)
-                  continue
-              manifest["files"][name] = {"size": size, "sha256": sha256(name), "drive_id": fid}
-              print("OK", name, size, manifest["files"][name]["sha256"][:16], flush=True)
-          json.dump(manifest, open("manifest.json", "w"), indent=1)
-          if failed:
-              print("FAILED:", failed)
-              sys.exit(1)
-          PY
-          python relay_fetch.py
-      - name: Publish release with the untouched files
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg patch fonts-dejavu-core
+          ffmpeg -version | head -1
+      - name: Python packages
+        run: pip install -r requirements.txt
+      - name: Poppins font
         run: |
-          gh release delete "$TAG" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
-          gh release create "$TAG" gal.mp4 dor.mp4 rma.mp4 music.m4a ref.mp4 manifest.json \
-            --repo "$GITHUB_REPOSITORY" --title "Source media $TAG" \
-            --notes "Byte-exact copies from Google Drive. Verify with manifest.json (size + sha256)."
-            
+          sudo mkdir -p /usr/share/fonts/truetype/google-fonts
+          for w in Bold Regular; do
+            sudo curl -fsSL -o /usr/share/fonts/truetype/google-fonts/Poppins-$w.ttf \
+              "https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-$w.ttf" || echo "Poppins-$w download failed (pipeline falls back to DejaVu)"
+          done
+          sudo fc-cache -f || true
+      - name: Work directory at the path the scripts expect
+        run: |
+          sudo mkdir -p /home/claude/work
+          sudo chown -R "$USER" /home/claude
+          mkdir -p /home/claude/work/src /home/claude/work/build
+      - name: Run the supervised pipeline (Mechanic)
+        id: pipeline
+        run: python autonomy/run_pipeline.py
+      - name: Step summary and exit status
+        if: always()
+        run: |
+          {
+            echo "### Highlight pipeline"
+            echo "outcome: ${{ steps.pipeline.outcome }}"
+            ls -la /home/claude/work/build/*.mp4 2>/dev/null || echo "no video produced"
+            [ -f /home/claude/work/alerts.log ] && { echo '```'; tail -40 /home/claude/work/alerts.log; echo '```'; }
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Collect logs and proposals
+        if: always()
+        run: |
+          mkdir -p /home/claude/out
+          cp /home/claude/work/*.log /home/claude/out/ 2>/dev/null || true
+          cp /home/claude/work/build/*.log /home/claude/out/ 2>/dev/null || true
+          cp -r /home/claude/work/proposals /home/claude/out/ 2>/dev/null || true
+          cp /home/claude/work/analysis/*.json /home/claude/out/ 2>/dev/null || true
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-logs
+          path: /home/claude/out
+          retention-days: 14
+          if-no-files-found: ignore
+      - name: Upload final video as artifact (always kept)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-video
+          path: /home/claude/work/build/*_Highlights.mp4
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: ignore
+      - name: Fallback release asset (only if the Drive export failed or is not configured)
+        if: always() && steps.pipeline.outcome == 'success'
+        run: |
+          set -euo pipefail
+          if [ -f /home/claude/work/build/export_failed ]; then
+            V=$(ls /home/claude/work/build/*_Highlights.mp4 | head -1)
+            gh release create "$TAG" "$V" --repo "$GITHUB_REPOSITORY" --title "Output $TAG" \
+              --notes "Drive export failed or is not configured; video kept here as a fallback."
+          fi
+          
