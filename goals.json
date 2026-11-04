@@ -1,2 +1,0 @@
-{"protected":{"output":"1920x1080","fps":30,"min_clip_frames":90,"end_at_audible_end":true,"final_len_rule":"floor(audible_end*2)/2","wide_share_max":0.25,"letterbox_px":55,"audio":"AAC 256k 44.1k, -2 dB headroom"},
- "note":"The Mechanic must never change these. A fix that would touch them halts the run and asks a human."}
