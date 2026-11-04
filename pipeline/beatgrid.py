@@ -1,3 +1,8 @@
+"""python3 beatgrid.py MUSIC [pmin pmax]  -> prints analysis, writes beat.json {P,OFF,end,file_len,constant,segments}. Coarse-to-fine, runs in seconds-minutes."""
+import numpy as np, wave, sys, subprocess, json, os
+WAV=os.environ.get('BEAT_WAV','/home/claude/work/music.wav')
+from scipy.signal import stft
+src=sys.argv[1]; pmin=float(sys.argv[2]) if len(sys.argv)>2 else 0.38; pmax=float(sys.argv[3]) if len(sys.argv)>3 else 0.70
 subprocess.run(['ffmpeg','-v','error','-y','-i',src,'-ac','1','-ar','22050',WAV],check=True,timeout=250)
 w=wave.open(WAV); sr=w.getframerate(); n=w.getnframes()
 x=np.frombuffer(w.readframes(n),dtype=np.int16).astype(np.float32)/32768
