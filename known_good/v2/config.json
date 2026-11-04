@@ -1,0 +1,21 @@
+{
+ "delogo": {
+  "gal": "826:960:266:28",
+  "dor": "812:934:294:42",
+  "rma": "172:912:270:32"
+ },
+ "grade": {
+  "dor": {
+   "eq": "eq=contrast=1.2:brightness=0:saturation=1.1:gamma=1.1",
+   "vignette": "vignette=PI/10"
+  },
+  "gal": {
+   "eq": "eq=contrast=1.3:brightness=0.06:saturation=1.1:gamma=1.2",
+   "vignette": "vignette=PI/16"
+  },
+  "rma": {
+   "eq": "eq=contrast=1.05:brightness=0.03:saturation=1.1:gamma=1.1",
+   "vignette": "vignette=PI/10"
+  }
+ }
+}
