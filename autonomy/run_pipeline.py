@@ -59,7 +59,7 @@ def main():
             if p.returncode!=0 or not os.path.exists(f'{SRC}/full_{s}.npy'): bad.append((s,out[-400:]))
         if bad: raise M.StageFail('cut scan failed for '+', '.join(s for s,_ in bad),'\n'.join(t for _,t in bad))
     def plan():
-        r=subprocess.run([sys.executable,HERE+'/apply_known_good.py'],capture_output=True,text=True,cwd=PIPE,env=dict(m.env,PIPE_DIR=PIPE)); m.log(r.stdout.strip())
+        r=subprocess.run([sys.executable,HERE+'/apply_known_good.py'],capture_output=True,text=True,cwd=PIPE,env=dict(m.env,PIPE_DIR=PIPE)); m.log(r.stdout.strip()+(' | stderr: '+r.stderr.strip()[-300:] if r.returncode not in (0,3) or not r.stdout.strip() else ''))
         if r.returncode==0:
             S['known']=True; mm=re.search(r'player (.+?) club (.+)$',r.stdout.strip()); 
             if mm: S['player'],S['club']=mm.group(1),mm.group(2)
@@ -121,3 +121,4 @@ def main():
         m.unsolved.append(f'unexpected crash: {type(e).__name__}: {e}'); m.notify('failure','[Video pipeline] CRASHED',m.summary_text('CRASHED',traceback.format_exc()[-1500:] if False else str(e))); return 1
 import traceback
 if __name__=='__main__': sys.exit(main())
+    
