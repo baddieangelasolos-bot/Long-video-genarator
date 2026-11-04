@@ -36,7 +36,7 @@ def main():
         res=[]
         def one(lo,hi):
             out=py(PIPE+'/beatgrid.py',SRC+'/music.m4a',lo,hi,cwd=PIPE,timeout=900); b=json.load(open(PIPE+'/beat.json')); b['bpm']=60/b['P']; res.append((b,out)); return out
-        out=one(0.38,0.70); cands=[float(x) for x in re.findall(r'[\d.]+',(re.search(r'autocorr candidates BPM: \[(.*?)\]',out) or [0,''])[1])][:3]
+        out=one(0.38,0.70); cands=[float(x) for x in re.findall(r'\d+\.\d+|\d+',(re.search(r'autocorr candidates BPM: \[(.*?)\]',out) or [0,''])[1])][:3]
         periods=[]
         for bpm in cands:
             for f in (1,0.5,1/3,2):
