@@ -1,8 +1,3 @@
-"""python3 beatgrid.py MUSIC [pmin pmax]  -> prints analysis, writes beat.json {P,OFF,end,file_len,constant,segments}. Coarse-to-fine, runs in seconds-minutes."""
-import numpy as np, wave, sys, subprocess, json, os
-WAV=os.environ.get('BEAT_WAV','/home/claude/work/music.wav')
-from scipy.signal import stft
-src=sys.argv[1]; pmin=float(sys.argv[2]) if len(sys.argv)>2 else 0.38; pmax=float(sys.argv[3]) if len(sys.argv)>3 else 0.70
 subprocess.run(['ffmpeg','-v','error','-y','-i',src,'-ac','1','-ar','22050',WAV],check=True,timeout=250)
 w=wave.open(WAV); sr=w.getframerate(); n=w.getnframes()
 x=np.frombuffer(w.readframes(n),dtype=np.int16).astype(np.float32)/32768
@@ -12,7 +7,7 @@ end=idx[-1]/sr; print('audible %.2fs to %.2fs of file %.2fs (trailing silence %.
 hop=128; f,t,Z=stft(x,fs=sr,nperseg=1024,noverlap=1024-hop)
 S=np.log1p(10*np.abs(Z)); flux=np.concatenate([[0],np.maximum(0,np.diff(S,axis=1)).sum(0)]); flux=np.maximum(flux-np.median(flux),0); h=hop/sr
 ac=np.correlate(flux,flux,'full')[len(flux)-1:]; lo,hi=int(0.30/h),min(int(1.0/h),len(ac)-1)
-cand=np.argsort(ac[lo:hi])[::-1][:5]+lo; print('autocorr candidates BPM:',[round(60/(c*h),1) for c in cand])
+cand=np.argsort(ac[lo:hi])[::-1][:5]+lo; print('autocorr candidates BPM:',[round(float(60/(c*h)),1) for c in cand])
 def score(P,off,a,b):
     ks=np.arange(np.ceil((a-off)/P),np.floor((b-off)/P)); 
     if len(ks)==0: return 0.0
