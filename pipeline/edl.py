@@ -2,7 +2,17 @@
 Hard rules: every clip >= 90 frames (3.0s), unique ids, valid windows, no cut inside window (when scan data exists)."""
 import json, sys, os, subprocess
 HERE=os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0,HERE)
-from ai_router import local_window_ok
+try: from ai_router import local_window_ok
+except ImportError:   # self-contained fallback so edl.py works even if ai_router.py is missing from the repo
+    import numpy as np
+    def local_window_ok(src,a,b,fps,S='/home/claude/work/src',M=0.05):
+        f=f'{S}/full_{src}.npy'
+        if not os.path.exists(f): return None
+        d=np.load(f)
+        for i in range(max(int(max(0,a-0.5)*fps),9),min(int((b+0.5)*fps),len(d)-9)):
+            loc=np.median(np.concatenate([d[i-8:i],d[i+1:i+9]]))
+            if d[i]>max(14.0,3.0*loc+6) and a+M<(i+1)/fps<b-M: return False
+        return True
 d=json.load(open(sys.argv[1] if len(sys.argv)>1 else HERE+'/edl_input.json'))
 if 'P' not in d: b=json.load(open(HERE+'/beat.json')); d['P'],d['OFF']=b['P'],b['OFF']
 P,OFF,FPS=d['P'],d['OFF'],30; fr=lambda k:int(round((OFF+P*k)*FPS)); out=[]; k=0; errs=[]; seen=set(); info={}
