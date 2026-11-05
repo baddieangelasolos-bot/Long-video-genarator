@@ -108,7 +108,7 @@ def main():
     try:
         for name,fn,kw in (('prepare',prepare,{}),('fetch',fetch,{'retries':3}),('inventory',inventory,{}),('style',style,{'optional':True,'retries':1}),('beat',beat,{'retries':1}),('scan',scan,{}),
                            ('plan',plan,{}),('edl',edl,{'retries':4}),('watermark',watermark,{'optional':True,'retries':1}),('cards',cards,{}),('grade',grade,{'optional':True,'retries':1}),
-                           ('render',render,{'retries':3}),('assemble',assemble,{}),('qa',qa,{'retries':1}),('verify_output',verify_output,{'retries':0}),('export',export,{'optional':True,'retries':2})):
+                           ('render',render,{'retries':3}),('assemble',assemble,{}),('qa',qa,{'retries':1}),('verify_output',verify_output,{'retries':0}),('export',export,{'optional':True,'retries':0})):
             m.stage(name,fn,**kw)
         extra=f"Video: {S['out']}\nPlayer: {S['player']} / {S['club']} | plan: {'known-good (reproduced)' if S['known'] else 'AI/heuristic planner'} | final length {S['final_len']} s"
         status='SUCCESS' if not m.unsolved else 'SUCCESS WITH WARNINGS'; m.notify('success',f'[Video pipeline] {status}',m.summary_text(status,extra))
