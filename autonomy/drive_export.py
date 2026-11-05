@@ -17,9 +17,12 @@ def call(event,**kw):
     for a in range(1,5):
         try:
             r=requests.post(url,data=json.dumps(dict(token=tok,event=event,**kw)),headers={'Content-Type':'text/plain'},timeout=90)
+            if r.status_code in (400,401,403,404) or r.text.lstrip()[:1]=='<':
+                raise SystemExit(f'[export] Apps Script URL/deployment problem (HTTP {r.status_code}, not JSON). Fix APPS_SCRIPT_URL: it must be the Web app /exec URL, deployed with access Anyone. Not retrying.')
             j=r.json()
             if j.get('ok') is not None: return j
             last=f'unexpected reply {r.text[:120]}'
+        except SystemExit: raise
         except Exception as e: last=f'{type(e).__name__}: {str(e)[:120]}'
         time.sleep(SLEEP*a)
     raise RuntimeError(f'Apps Script call {event} failed: {last}')
@@ -68,3 +71,4 @@ def main():
     except Exception as e: log('success email failed (video is uploaded):',e)
     return 0
 if __name__=='__main__': sys.exit(main())
+    
