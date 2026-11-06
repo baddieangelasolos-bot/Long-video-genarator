@@ -1,0 +1,86 @@
+name: claude-control
+
+on:
+  repository_dispatch:
+    types: [claude-control]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: claude-control
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Execute command
+        env:
+          # Payload goes through env vars, never inline ${{ }} in the script (prevents injection)
+          CMD: ${{ github.event.client_payload.command }}
+          TARGET: ${{ github.event.client_payload.target_path }}
+          DEST: ${{ github.event.client_payload.destination_path }}
+          HOOK: ${{ github.event.client_payload.return_webhook_url }}
+        run: |
+          set -uo pipefail
+
+          notify() { # status, message, [data]
+            [ -z "${HOOK:-}" ] && return 0
+            jq -n --arg s "$1" --arg m "$2" --arg d "${3:-}" --arg c "$CMD" \
+                  --arg t "$TARGET" --arg r "$GITHUB_REPOSITORY" \
+              '{status:$s,message:$m,data:$d,command:$c,target_path:$t,repo:$r}' \
+            | curl -sS -m 20 -X POST -H 'Content-Type: application/json' -d @- "$HOOK" >/dev/null || true
+          }
+          fail() { notify "error" "$1"; echo "ERROR: $1" >&2; exit 1; }
+
+          # Callback must be a Make.com webhook (blocks data exfiltration)
+          if [ -n "${HOOK:-}" ] && ! [[ "$HOOK" =~ ^https://hook\.([a-z0-9-]+\.)?make\.com/ ]]; then
+            echo "Rejected return_webhook_url"; HOOK=""; exit 1
+          fi
+
+          # Path safety: relative, no traversal, not .git or workflows
+          check_path() {
+            case "$1" in
+              ""|/*|*..*|.git|.git/*|.github/workflows/*) fail "Illegal path: $1" ;;
+            esac
+          }
+          check_path "$TARGET"
+
+          case "$CMD" in
+            INSPECT)
+              if [ -f "$TARGET" ]; then
+                notify "ok" "file" "$(base64 -w0 -- "$TARGET")"
+              elif [ -d "$TARGET" ]; then
+                notify "ok" "directory" "$(git ls-files -- "$TARGET")"
+              else
+                # fall back to filename search
+                found="$(git ls-files | grep -i -- "$(basename "$TARGET")" | head -50 || true)"
+                [ -n "$found" ] && notify "ok" "search" "$found" || fail "Not found: $TARGET"
+              fi
+              exit 0
+              ;;
+            MOVE)
+              check_path "$DEST"
+              [ -e "$TARGET" ] || fail "Source not found: $TARGET"
+              mkdir -p -- "$(dirname -- "$DEST")"
+              git mv -- "$TARGET" "$DEST" || fail "git mv failed"
+              MSG="claude-control: move $TARGET -> $DEST"
+              ;;
+            DELETE)
+              git ls-files --error-unmatch -- "$TARGET" >/dev/null 2>&1 || fail "Not tracked: $TARGET"
+              git rm -r -- "$TARGET" || fail "git rm failed"
+              MSG="claude-control: delete $TARGET"
+              ;;
+            *) fail "Unknown command: $CMD" ;;
+          esac
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "$MSG" || fail "Nothing to commit"
+          git push || fail "Push failed"
+          notify "ok" "$MSG" "$(git rev-parse HEAD)"
+          
