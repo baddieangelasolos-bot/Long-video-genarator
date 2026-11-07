@@ -121,4 +121,3 @@ def main():
         m.unsolved.append(f'unexpected crash: {type(e).__name__}: {e}'); m.notify('failure','[Video pipeline] CRASHED',m.summary_text('CRASHED',traceback.format_exc()[-1500:] if False else str(e))); return 1
 import traceback
 if __name__=='__main__': sys.exit(main())
-    
