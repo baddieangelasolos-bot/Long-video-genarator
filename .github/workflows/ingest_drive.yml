@@ -129,4 +129,11 @@ jobs:
             gh release create "$TAG" "$V" --repo "$GITHUB_REPOSITORY" --title "Output $TAG" \
               --notes "Drive export failed or is not configured; video kept here as a fallback."
           fi
+                - name: Email logs on any failure
+        if: always()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+          PIPELINE_OUTCOME: ${{ steps.pipeline.outcome }}
+        run: python3 autonomy/email_logs.py
           
