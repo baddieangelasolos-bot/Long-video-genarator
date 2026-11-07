@@ -15,6 +15,13 @@ def main():
         for d in ('src','build/clips','fine','analysis','qa','shots','cards'): os.makedirs(f'{WORK}/{d}',exist_ok=True)
         m.run_cmd('ffmpeg -version | head -1 && ffprobe -version | head -1',cwd=WORK)
         if not os.path.exists('/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf'): m.notices.append('Poppins font missing: cards use a fallback font')
+        if os.environ.get('APPS_SCRIPT_URL'):
+            try:
+                r=subprocess.run([sys.executable,HERE+'/drive_export.py','--ping'],capture_output=True,text=True,timeout=300); txt=(r.stdout+r.stderr).strip()[-600:]
+                m.log('export preflight: '+txt.replace('\n',' | '))
+                if r.returncode!=0:
+                    m.notices.append('Drive export preflight FAILED (render continues): '+txt); m.notify('notice','[Video pipeline] Drive export will fail - fix now',txt)
+            except Exception as e: m.log(f'export preflight skipped: {type(e).__name__}')
         if G:
             rep=G.report(); m.notices+= [x for x in rep.splitlines() if 'NO AI' in x or 'Primary' in x or 'Requested' in x]
     def fetch():
