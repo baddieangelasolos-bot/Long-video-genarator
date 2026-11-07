@@ -71,4 +71,3 @@ def main():
     except Exception as e: log('success email failed (video is uploaded):',e)
     return 0
 if __name__=='__main__': sys.exit(main())
-    
