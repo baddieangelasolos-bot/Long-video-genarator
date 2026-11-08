@@ -1,2 +1,14 @@
-{"protected":{"output":"1920x1080","fps":30,"min_clip_frames":90,"end_at_audible_end":true,"final_len_rule":"floor(audible_end*2)/2","wide_share_max":0.25,"letterbox_px":55,"audio":"AAC 256k 44.1k, -2 dB headroom"},
- "note":"The Mechanic must never change these. A fix that would touch them halts the run and asks a human."}
+{
+ "protected": {
+  "output": "1920x1080",
+  "fps": "adaptive: 24/25/30/50/60 to match the footage (30 when sources are 30 fps), 30 default",
+  "min_clip_s": "3.0 s default; with a reference video its own minimum (style.json min_clip_s, never below 1.2 s)",
+  "end_at_audible_end": true,
+  "final_len_rule": "floor(audible_end*2)/2, or shorter when there is not enough usable footage",
+  "wide_share_max": 0.25,
+  "letterbox_pct": "5.09 default; with a reference video the measured value",
+  "audio": "AAC 256k 44.1k, -2 dB headroom",
+  "quality": "x264 CRF 15 preset slow, Lanczos scaling, supersampled zoom"
+ },
+ "note": "The Mechanic must never change these. A fix that would touch them halts the run and asks a human. Edited by a human (the owner) to follow the reference video when one exists."
+}
