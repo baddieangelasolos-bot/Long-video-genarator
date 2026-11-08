@@ -38,8 +38,8 @@ def rank(ids,role='vision'):
     if role=='json': order=[m for m in order if 'lite' in m or 'flash' in m]+[m for m in order if not('lite' in m or 'flash' in m)]
     return order[:10]
 class _Skip(Exception): pass
-def _call(model,prompt,images,json_mode,timeout):
-    parts=[{'text':prompt}]
+def _call(model,prompt,images,json_mode,timeout,extra_parts=()):
+    parts=[{'text':prompt}]+list(extra_parts)
     for p in images or []: parts.append({'inline_data':{'mime_type':'image/jpeg','data':base64.b64encode(open(p,'rb').read()).decode()}})
     body={'contents':[{'parts':parts}]}
     if json_mode: body['generationConfig']={'responseMimeType':'application/json'}
@@ -55,18 +55,47 @@ def _call(model,prompt,images,json_mode,timeout):
     if json_mode:
         t=txt.strip(); t=re.sub(r'^```(?:json)?|```$','',t,flags=re.M).strip(); json.loads(t); txt=t
     return txt
-def ask(role,prompt,images=(),json_mode=False,timeout=120):
+def ask(role,prompt,images=(),json_mode=False,timeout=120,extra_parts=()):
     ids=discover(); tiers=rank(ids,role)
     if not tiers: return None,None
     for i,m in enumerate(tiers):
         if _cool.get(m,0)>time.time(): continue
         try:
-            txt=_call(m,prompt,images,json_mode,timeout)
+            txt=_call(m,prompt,images,json_mode,timeout,extra_parts)
             if i>0: ev(f'FALLBACK: primary {tiers[0]} unavailable, answered by tier {i+1} ({m})')
             return txt,m
         except _Skip as e: ev(str(e)+' -> next tier')
         except Exception as e: ev(f'{m}: {type(e).__name__} {str(e)[:80]} -> next tier')
     ev('ALL Gemini tiers failed for this request'); return None,None
+# ---------- whole-video understanding (Gemini Files API) ----------
+UPLOAD_BASE=os.environ.get('GEMINI_UPLOAD_BASE','https://generativelanguage.googleapis.com/upload/v1beta')
+def upload_file(path,mime='video/mp4',timeout=900):
+    """Resumable upload to the Files API, waits until the video is processed (ACTIVE). Returns the file resource dict."""
+    size=os.path.getsize(path)
+    h={'x-goog-api-key':key(),'X-Goog-Upload-Protocol':'resumable','X-Goog-Upload-Command':'start','X-Goog-Upload-Header-Content-Length':str(size),'X-Goog-Upload-Header-Content-Type':mime}
+    r=requests.post(UPLOAD_BASE+'/files',headers=h,json={'file':{'display_name':os.path.basename(path)[:60]}},timeout=60)
+    url=r.headers.get('X-Goog-Upload-URL')
+    if not url: raise RuntimeError(f'file upload start refused HTTP {r.status_code}')
+    with open(path,'rb') as f:
+        r2=requests.post(url,headers={'x-goog-api-key':key(),'Content-Length':str(size),'X-Goog-Upload-Offset':'0','X-Goog-Upload-Command':'upload, finalize'},data=f,timeout=timeout)
+    if r2.status_code!=200: raise RuntimeError(f'file upload failed HTTP {r2.status_code}')
+    fj=r2.json()['file']
+    for _ in range(int(os.environ.get('GEMINI_FILE_POLLS','72'))):
+        st=requests.get(f"{BASE}/{fj['name']}",headers={'x-goog-api-key':key()},timeout=30).json()
+        if st.get('state')=='ACTIVE': return st
+        if st.get('state')=='FAILED': raise RuntimeError('Gemini could not process the video')
+        time.sleep(float(os.environ.get('GEMINI_FILE_POLL_SLEEP','5')))
+    raise RuntimeError('Gemini video processing timed out')
+def delete_file(name):
+    try: requests.delete(f'{BASE}/{name}',headers={'x-goog-api-key':key()},timeout=30)
+    except Exception: pass
+def ask_video(role,prompt,video_path,mime='video/mp4',json_mode=True,timeout=300):
+    """Gemini WATCHES the whole video (frames + motion + audio). Returns (text, model) or (None, None). The uploaded copy is deleted afterwards."""
+    if not discover(): return None,None
+    try: fj=upload_file(video_path,mime)
+    except Exception as e: ev(f'video upload failed: {type(e).__name__} {str(e)[:100]}'); return None,None
+    try: return ask(role,prompt,json_mode=json_mode,timeout=timeout,extra_parts=[{'file_data':{'mime_type':fj.get('mimeType',mime),'file_uri':fj['uri']}}])
+    finally: delete_file(fj['name'])
 def report(roles=('vision','json','reason')):
     """Writes analysis/model_report.json and returns text for the alert email: which real models exist and the 10-tier order per role."""
     ids=discover(); rep={'discovered':len(ids),'tiers':{r:rank(ids,r) for r in roles}}
