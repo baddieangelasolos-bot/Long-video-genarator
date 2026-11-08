@@ -1,5 +1,6 @@
-# Autonomous repo: status
-Sections 1-9 written. Section 5 machinery verified by 21 auto-patch checks (tests/test_autopatch.py) on top of the earlier 18. Section 7: .github/workflows/ingest_drive.yml (full pipeline) + requirements.txt, YAML and every inline bash step syntax-checked only. Section 8: autonomy/drive_export.py (7/7 mock checks, tests/test_export.py) and docs/Code_v2_upload.gs (16/16 mock checks, tests/test_gs_v2.js). Section 9: docs/SETUP_GUIDE.md.
-NOT verified: real end-to-end render (no source media available in this chat), anything on real GitHub Actions, real Gemini, real Apps Script deployment, real Drive upload, real email.
-Known-good plan v2 signature starts 431f4be849035dfe.
-Next: follow docs/SETUP_GUIDE.md, first real run, review output by eye.
+# Autonomous repo: status (v3)
+Written: dynamic sources from the Drive folders (fetch_drive.py), identify + Gemini reference video (ai_director.py, style.json), adaptive fps, quality renderer (render.py), planner shortens video when footage is short, overrides.json, drive_export preflight, email_logs.py.
+Verified locally (synthetic media, mock Gemini): all unit suites (autopatch 21, export 7, export_url 6, router_video 6, gs_v2 16, gs_list 6, fetch 11) and a FULL end-to-end run (identify, style_ai, beat, scan, plan, edl, watermark, cards, grade, render, assemble, qa, verify_output): 1920x1080, 30 fps, 1185 frames = 39.5 s, audio aligned. Also: no reference + no AI run completes with default style and a SHORTER VIDEO notice; fps selection checked (60 fps set -> 60, MAX_FPS cap, override).
+NOT verified: anything on real GitHub Actions, real Gemini (incl. Files API), real Apps Script deployment, real Drive upload/download (gdown on folder-shared files), real email, real footage planner behaviour, render time on the runner (estimate only), the visual quality of the output by eye.
+Hand steps still open: paste docs/Code_v2_upload.gs into Apps Script + new deployment; run shareResourceFolders once, then testListSources; add the email-logs step and check timeout-minutes in ingest_drive.yml; make sure no RELAY_FILES_JSON is passed.
+Known-good plan v2 signature starts 431f4be849035dfe (only replays for the exact old three-file set).
