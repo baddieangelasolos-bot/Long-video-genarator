@@ -2,7 +2,10 @@
 import sys, json, subprocess, numpy as np, re, os, tempfile, shutil
 from PIL import Image, ImageDraw, ImageFont
 HERE=os.path.dirname(os.path.abspath(__file__)); v=sys.argv[1]; sd=sys.argv[2] if len(sys.argv)>2 else '/home/claude/work/qa'; os.makedirs(sd,exist_ok=True)
-EDL=json.load(open(HERE+'/edl.json')); exp=sum(c['frames'] for c in EDL); problems=[]
+EDL=json.load(open(HERE+'/edl.json'))
+try: FPS=int(json.load(open(HERE+'/config.json')).get('fps',30))
+except Exception: FPS=30
+exp=sum(c['frames'] for c in EDL); problems=[]
 j=json.loads(subprocess.run(['ffprobe','-v','error','-count_frames','-show_entries','stream=codec_type,nb_read_frames,width,height,r_frame_rate,start_time,sample_rate','-of','json',v],capture_output=True,text=True).stdout)
 V=[s for s in j['streams'] if s['codec_type']=='video'][0]; A=[s for s in j['streams'] if s['codec_type']=='audio']
 print('video',V['width'],V['height'],V['r_frame_rate'],'frames',V['nb_read_frames'],'expected',exp)
@@ -33,7 +36,7 @@ if A:
 # labelled contact sheets, 1 tile/second via accurate fast-seek
 ids=[]; 
 for c in EDL: ids+= [c['id']]*c['frames']
-tw,th,cols,per=240,135,8,40; n=int(exp/30); tmp=tempfile.mkdtemp()
+tw,th,cols,per=240,135,8,40; n=int(exp/FPS); tmp=tempfile.mkdtemp()
 try: font=ImageFont.truetype('/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf',13)
 except Exception: font=ImageFont.load_default()
 sheets=[]
@@ -43,7 +46,7 @@ for s0 in range(0,n,per):
         fp=f'{tmp}/{t}.jpg'; subprocess.run(['ffmpeg','-v','error','-y','-ss',str(t+0.5),'-i',v,'-frames:v','1','-vf',f'scale={tw}:{th}','-q:v','4',fp],timeout=60)
         x,y=(k%cols)*tw,(k//cols)*th
         if os.path.exists(fp): im.paste(Image.open(fp),(x,y))
-        dr.rectangle([x,y,x+92,y+16],fill=(0,0,0)); dr.text((x+3,y),f'{t}s {ids[min(int((t+0.5)*30),len(ids)-1)]}',fill=(255,255,0),font=font)
+        dr.rectangle([x,y,x+92,y+16],fill=(0,0,0)); dr.text((x+3,y),f'{t}s {ids[min(int((t+0.5)*FPS),len(ids)-1)]}',fill=(255,255,0),font=font)
     pth=f'{sd}/qa_sheet_{s0//per+1}.jpg'; im.save(pth,quality=80); sheets.append(pth)
 shutil.rmtree(tmp,ignore_errors=True); print('sheets:',sheets)
 print('QA RESULT:','PASS (automated checks only; visual review of sheets still required)' if not problems else 'ATTENTION: '+'; '.join(problems))

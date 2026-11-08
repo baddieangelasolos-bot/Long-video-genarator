@@ -1,5 +1,5 @@
 """python3 edl.py [edl_input.json]. Input: {"P":..,"OFF":..} (or omit -> beat.json), "final_len", "clips":[[id,sec,src,start,speed,beats,zb,ax,ay],...]
-Hard rules: every clip >= 90 frames (3.0s), unique ids, valid windows, no cut inside window (when scan data exists)."""
+Hard rules: every clip >= min_clip_s (3.0 s default, style.json) at the output fps (config.json), unique ids, valid windows, no cut inside window (when scan data exists)."""
 import json, sys, os, subprocess
 HERE=os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0,HERE)
 try: from ai_router import local_window_ok
@@ -15,7 +15,11 @@ except ImportError:   # self-contained fallback so edl.py works even if ai_route
         return True
 d=json.load(open(sys.argv[1] if len(sys.argv)>1 else HERE+'/edl_input.json'))
 if 'P' not in d: b=json.load(open(HERE+'/beat.json')); d['P'],d['OFF']=b['P'],b['OFF']
-P,OFF,FPS=d['P'],d['OFF'],30; fr=lambda k:int(round((OFF+P*k)*FPS)); out=[]; k=0; errs=[]; seen=set(); info={}
+def _j(p):
+    try: return json.load(open(p))
+    except Exception: return {}
+FPS=int(_j(HERE+'/config.json').get('fps',30)); MINF=int(round(float(_j(HERE+'/style.json').get('min_clip_s',3.0))*FPS))   # 3.0 s by default, the reference's own minimum when it cuts faster
+P,OFF=d['P'],d['OFF']; fr=lambda k:int(round((OFF+P*k)*FPS)); out=[]; k=0; errs=[]; seen=set(); info={}
 def srcinfo(s):
     if s not in info:
         r=subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries','stream=r_frame_rate:format=duration','-of','json',f'/home/claude/work/src/{s}.mp4'],capture_output=True,text=True)
@@ -30,7 +34,7 @@ for row in d['clips']:
     if sec not in('intro','body','finale'): errs.append(f'{i}: bad section {sec}')
     if not 0.3<=sp<=1.5: errs.append(f'{i}: speed {sp} out of range')
     f0,f1=fr(k),fr(k+b); fl=f1-f0; sd=fl/FPS*sp
-    if fl<90: errs.append(f'{i}: only {fl} frames (<90 = 3.0s rule)')
+    if fl<MINF: errs.append(f'{i}: only {fl} frames (<{MINF} = {MINF/FPS:.1f}s minimum clip rule)')
     si=srcinfo(src)
     if si is None: errs.append(f'{i}: source {src}.mp4 missing/unreadable')
     else:

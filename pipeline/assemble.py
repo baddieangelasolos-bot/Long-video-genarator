@@ -2,6 +2,8 @@
 import json, os, sys, subprocess, hashlib
 HERE=os.path.dirname(os.path.abspath(__file__)); B='/home/claude/work/build'
 music,Larg,out=sys.argv[1],sys.argv[2],sys.argv[3]
+try: FPS=int(json.load(open(HERE+'/config.json')).get('fps',30))
+except Exception: FPS=30
 EDLTXT=open(HERE+'/edl.json').read(); EDL=json.loads(EDLTXT)
 try: st=json.load(open(B+'/render_status.json'))
 except Exception: sys.exit('ABORT: no render_status.json (render not finished)')
@@ -19,14 +21,14 @@ open(B+'/list.txt','w').write('\n'.join(lines)+'\n')
 r=subprocess.run(['ffprobe','-v','error','-show_entries','format=duration','-of','csv=p=0',music],capture_output=True,text=True); mlen=float(r.stdout.strip())
 L=json.load(open(HERE+'/beat.json'))['end'] if Larg=='auto' else float(Larg)
 if L>mlen+0.05: sys.exit(f'ABORT: L={L} longer than music {mlen}')
-if abs(tot/30-L)>0.04: sys.exit(f'ABORT: video {tot/30:.3f}s vs L={L:.3f}s (fix EDL final_len)')
+if abs(tot/FPS-L)>0.04: sys.exit(f'ABORT: video {tot/FPS:.3f}s vs L={L:.3f}s (fix EDL final_len)')
 tmp=out+'.part.mp4'; af=f'volume=-2dB,afade=t=out:st={L-0.45}:d=0.45,atrim=0:{L}'
 base=['ffmpeg','-v','error','-y','-f','concat','-safe','0','-i',B+'/list.txt','-i',music,'-map','0:v:0','-map','1:a:0']
 tail=['-af',af,'-c:a','aac','-b:a','256k','-ar','44100','-t',str(L),'-movflags','+faststart',tmp]
 r=subprocess.run(base+['-c:v','copy']+tail,capture_output=True,text=True)
 if r.returncode!=0:
     print('stream-copy concat failed, FALLBACK re-encode:',r.stderr[-200:])
-    r=subprocess.run(base+['-c:v','libx264','-preset','veryfast','-crf','17','-pix_fmt','yuv420p','-r','30','-g','30','-x264-params','keyint=30:min-keyint=30:scenecut=0','-colorspace','bt709','-color_primaries','bt709','-color_trc','bt709']+tail,capture_output=True,text=True)
+    r=subprocess.run(base+['-c:v','libx264','-preset','slow','-crf','15','-pix_fmt','yuv420p','-r',str(FPS),'-g',str(FPS),'-x264-params',f'keyint={FPS}:min-keyint={FPS}:scenecut=0','-colorspace','bt709','-color_primaries','bt709','-color_trc','bt709']+tail,capture_output=True,text=True)
     if r.returncode!=0: sys.exit('ABORT: both assembly paths failed: '+r.stderr[-300:])
 d=float(subprocess.run(['ffprobe','-v','error','-show_entries','format=duration','-of','csv=p=0',tmp],capture_output=True,text=True).stdout.strip())
 if abs(d-L)>0.1: sys.exit(f'ABORT: output {d:.2f}s != {L:.2f}s')

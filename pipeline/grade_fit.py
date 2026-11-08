@@ -2,7 +2,11 @@
 """python3 grade_fit.py  -> fits per-source eq + vignette so the graded ACTIVE picture matches the reference's measured stats. Writes config.json['grade']."""
 import json, os, subprocess, shutil, numpy as np
 HERE=os.path.dirname(os.path.abspath(__file__)); EDL=json.load(open(HERE+'/edl.json')); CFG=json.load(open(HERE+'/config.json'))
-T=dict(sat=0.512,luma=81.4,std=42.5,p5=13.0,p95=196.7,vig=0.908)     # measured on reference body (measure_grade.py, bars excluded)
+T=dict(sat=0.512,luma=81.4,std=42.5,p5=13.0,p95=196.7,vig=0.908)     # default target (the original reference); replaced by the CURRENT reference's measured values when style.json has them
+try:
+    _t=json.load(open(HERE+'/style.json')).get('grade_target')
+    if _t and all(k in _t for k in T): T=dict({k:float(_t[k]) for k in T}); print('grade target from the current reference:',T)
+except Exception: pass
 TW,TH=256,144; ACT=int(TH*0.05)
 def frames(src):
     d=f'/tmp/gf_{src}'; shutil.rmtree(d,ignore_errors=True); os.makedirs(d); k=0
