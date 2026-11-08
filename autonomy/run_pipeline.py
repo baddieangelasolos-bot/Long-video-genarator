@@ -8,8 +8,24 @@ except Exception: G=None
 HERE,WORK,PIPE,BUILD=M.HERE,M.WORK,M.PIPE,M.BUILD; SRC=os.environ.get('SRC_DIR',WORK+'/src')
 def ff(path,entries='format=duration:stream=r_frame_rate,width,height'):
     r=subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries',entries,'-of','json',path],capture_output=True,text=True); return json.loads(r.stdout)
+def _guard(self,where=''):
+    """Protected-goal check (goals.json hash, exact length, minimum clip, wide-shot cap) using the run's own fps and style instead of fixed 30 fps / 90 frames."""
+    import hashlib
+    if hashlib.sha256(open(M.GOALS_PATH,'rb').read()).hexdigest()!=self.goals_sha: raise M.Halt('goals.json changed during the run: protected goals must never be edited by automation')
+    def j(p,d):
+        try: return json.load(open(p))
+        except Exception: return d
+    p=PIPE+'/edl.json'
+    if os.path.exists(p):
+        e=json.load(open(p)); fps=int(j(PIPE+'/config.json',{}).get('fps',30)); st=j(PIPE+'/style.json',{}); minf=int(round(float(st.get('min_clip_s',3.0))*fps)); frames=sum(c['frames'] for c in e)
+        fl=j(PIPE+'/edl_input.json',{}).get('final_len')
+        if fl and abs(frames-round(fl*fps))>1: raise M.Halt(f'{where}: edit list is {frames} frames but the planned length is {fl}s = {round(fl*fps)} frames')
+        if any(c['frames']<minf and not c.get('pad') for c in e): raise M.Halt(f'{where}: a clip is shorter than the {minf/fps:.1f} s minimum')
+        cap=float(st.get('wide_share_max',0.25)); ws=j(os.path.join(WORK,'analysis','plan_notes.json'),{}).get('stats',{}).get('wide_share',0)
+        if ws>cap+1e-9: raise M.Halt(f'{where}: wide-shot share {ws} exceeds the {cap:.0%} cap')
+M.Mechanic.guard=_guard
 def main():
-    m=M.Mechanic(gemini=G); S={'player':os.environ.get('PLAYER_NAME','LAMINE YAMAL'),'club':os.environ.get('CLUB_NAME','FC BARCELONA'),'known':False,'final_len':None,'out':None,'srcs':[]}
+    m=M.Mechanic(gemini=G); S={'player':'HIGHLIGHTS','club':'','identity':'','known':False,'final_len':None,'out':None,'srcs':[]}
     py=lambda script,*a,**k: m.run_cmd([sys.executable,script,*map(str,a)],**k)
     def prepare():
         for d in ('src','build/clips','fine','analysis','qa','shots','cards'): os.makedirs(f'{WORK}/{d}',exist_ok=True)
@@ -27,18 +43,39 @@ def main():
     def fetch():
         if os.environ.get('SKIP_FETCH')=='1': return
         py(HERE+'/fetch_drive.py',cwd=WORK)
+    def pick_fps(info):
+        """Output frame rate follows the footage (24/25/30/50/60, capped by MAX_FPS) so motion stays smooth instead of being forced to 30."""
+        if os.environ.get('FPS_OVERRIDE') in ('24','25','30','50','60'): return int(os.environ['FPS_OVERRIDE'])
+        cap=int(os.environ.get('MAX_FPS','60')); w={}
+        for i in info.values(): near=min((24,25,30,50,60),key=lambda x:abs(x-i['fps'])); w[near]=w.get(near,0)+i['dur']
+        return min(cap,max(w,key=w.get)) if w else 30
     def inventory():
         info={}
-        for s in ('gal','dor','rma'):
-            p=f'{SRC}/{s}.mp4'
-            if os.path.exists(p):
-                j=ff(p); n,d=j['streams'][0]['r_frame_rate'].split('/'); info[s]=dict(fps=float(n)/float(d),dur=float(j['format']['duration']),w=j['streams'][0]['width'],h=j['streams'][0]['height'])
-        if not info: raise M.StageFail('no source videos found (gal/dor/rma.mp4)')
-        for f in ('music.m4a','ref.mp4'):
-            if not os.path.exists(f'{SRC}/{f}'): raise M.StageFail(f'missing {f}')
+        names=sorted(f[:-4] for f in os.listdir(SRC) if re.fullmatch(r's\d\d\.mp4',f)) or [s for s in ('gal','dor','rma') if os.path.exists(f'{SRC}/{s}.mp4')]
+        for s in names:
+            p=f'{SRC}/{s}.mp4'; j=ff(p); n,d=j['streams'][0]['r_frame_rate'].split('/'); dur=float(j['format']['duration'])
+            if dur<4: m.notices.append(f'{s} skipped: shorter than 4 s'); continue
+            info[s]=dict(fps=float(n)/float(d),dur=dur,w=j['streams'][0]['width'],h=j['streams'][0]['height'])
+        if not info: raise M.StageFail('no usable source videos found in the source folder')
+        if not os.path.exists(f'{SRC}/music.m4a'): raise M.StageFail('missing music.m4a')
         json.dump(info,open(WORK+'/analysis/src_info.json','w')); S['srcs']=sorted(info)
+        cfg=json.load(open(PIPE+'/config.json')); cfg.update(fps=pick_fps(info),delogo={},grade={}); json.dump(cfg,open(PIPE+'/config.json','w'),indent=1)
+        m.log(f"{len(info)} source video(s), output {cfg['fps']} fps: "+', '.join(f"{s} {info[s]['w']}x{info[s]['h']}@{info[s]['fps']:.0f} {info[s]['dur']:.0f}s" for s in S['srcs']))
+    def identify():
+        try: py(HERE+'/ai_director.py','identify',cwd=PIPE,env={'PIPE_DIR':PIPE,'WORK_DIR':WORK,'SRC_DIR':SRC},timeout=1200)
+        except M.StageFail as e: m.notices.append('player identification failed, neutral title used: '+str(e)[:100])
+        try: r=json.load(open(WORK+'/analysis/identity.json')); S['player'],S['club'],S['identity']=r['player'],r['club'],r['how']
+        except Exception: pass
+        m.log(f"title: {S['player']} / {S['club'] or '-'} ({S['identity']})")
     def style():
+        if not os.path.exists(SRC+'/ref.mp4'): m.log('no reference video: default editing style and rules'); return
         py(PIPE+'/analyze_reference.py',SRC+'/ref.mp4',cwd=PIPE,timeout=900)
+    def style_ai():
+        try: py(HERE+'/ai_director.py','style',cwd=PIPE,env={'PIPE_DIR':PIPE,'WORK_DIR':WORK,'SRC_DIR':SRC},timeout=1800)
+        except M.StageFail as e:
+            m.notices.append('reference style analysis failed, default style used: '+str(e)[:100]); sys.path.insert(0,HERE); import ai_director as D; json.dump(D.DEFAULT_STYLE,open(PIPE+'/style.json','w'),indent=1)
+        try: S['style']=json.load(open(PIPE+'/style.json'))
+        except Exception: S['style']={}
     def beat():
         res=[]
         def one(lo,hi):
@@ -75,7 +112,9 @@ def main():
         for s in S['srcs']: py(PIPE+'/shots.py',s,info[s]['fps'],info[s]['dur'],2.6,cwd=PIPE,env=env)
         py(PIPE+'/shots2.py',*S['srcs'],cwd=PIPE,timeout=3000)
         py(HERE+'/ai_planner.py',S['player'],cwd=PIPE,env={'PIPE_DIR':PIPE},timeout=3000)
-        n=json.load(open(WORK+'/analysis/plan_notes.json')); m.notices+=[x for x in n['notes'] if 'shortfall' in x.lower() or 'DEGRADED' in x]
+        n=json.load(open(WORK+'/analysis/plan_notes.json')); m.notices+=[x for x in n['notes'] if 'shortfall' in x.lower() or 'DEGRADED' in x or 'SHORTER VIDEO' in x]
+        try: S['final_len']=json.load(open(PIPE+'/edl_input.json'))['final_len']      # the planner may shorten the video when footage is short
+        except Exception: pass
     def edl(): py(PIPE+'/edl.py',cwd=PIPE)
     def watermark():
         cfg=json.load(open(PIPE+'/config.json')); info=json.load(open(WORK+'/analysis/src_info.json'))
@@ -96,15 +135,15 @@ def main():
         if st['fails']: raise M.StageFail('render failed clips: '+str(st['fails']),out[-1500:])
         if st['degraded']: m.notices.append('render degraded clips (retry ladder used): '+str(st['degraded']))
     def assemble():
-        S['out']=f"{BUILD}/{S['player'].title().replace(' ','_')}_Highlights.mp4"; py(PIPE+'/assemble.py',SRC+'/music.m4a',S['final_len'],S['out'],cwd=PIPE)
+        base=re.sub(r'[^A-Za-z0-9_]+','_',S['player'].title()).strip('_') or 'Video'; S['out']=f"{BUILD}/{base}.mp4" if base=='Highlights' else f"{BUILD}/{base}_Highlights.mp4"; py(PIPE+'/assemble.py',SRC+'/music.m4a',S['final_len'],S['out'],cwd=PIPE)
     def qa():
         out=py(PIPE+'/qa.py',S['out'],WORK+'/qa',cwd=PIPE,timeout=1800); line=[l for l in out.splitlines() if l.startswith('QA RESULT')]
         hard=[w for w in ('frame count mismatch','not 1920x1080','no audio','audio start_time') if line and w in line[0]]
         if hard: raise M.StageFail('QA hard failure: '+', '.join(hard),out[-1200:])
         if line and 'ATTENTION' in line[0]: m.notices.append('QA notices (advisory, inspect the sheets): '+line[0][:220])
     def verify_output():
-        j=ff(S['out']); st=j['streams'][0]; n,d=st['r_frame_rate'].split('/'); dur=float(j['format']['duration'])
-        if (st['width'],st['height'])!=(1920,1080) or abs(float(n)/float(d)-30)>0.01 or abs(dur-S['final_len'])>0.1: raise M.Halt(f'output spec violated protected goals: {st["width"]}x{st["height"]} {float(n)/float(d):.2f}fps {dur:.2f}s vs 1920x1080 30fps {S["final_len"]}s')
+        FPSOUT=int(json.load(open(PIPE+'/config.json')).get('fps',30)); j=ff(S['out']); st=j['streams'][0]; n,d=st['r_frame_rate'].split('/'); dur=float(j['format']['duration'])
+        if (st['width'],st['height'])!=(1920,1080) or abs(float(n)/float(d)-FPSOUT)>0.01 or abs(dur-S['final_len'])>0.1: raise M.Halt(f'output spec violated protected goals: {st["width"]}x{st["height"]} {float(n)/float(d):.2f}fps {dur:.2f}s vs 1920x1080 30fps {S["final_len"]}s')
     def export():
         e=HERE+'/drive_export.py'
         if not (os.path.exists(e) and os.environ.get('APPS_SCRIPT_URL')): m.notices.append('Drive export not configured: video kept as workflow artifact'); open(BUILD+'/export_failed','w').write('not configured'); return
@@ -113,11 +152,11 @@ def main():
         except BaseException: open(ef,'w').write('export failed'); raise
         if os.path.exists(ef): os.remove(ef)
     try:
-        for name,fn,kw in (('prepare',prepare,{}),('fetch',fetch,{'retries':3}),('inventory',inventory,{}),('style',style,{'optional':True,'retries':1}),('beat',beat,{'retries':1}),('scan',scan,{}),
+        for name,fn,kw in (('prepare',prepare,{}),('fetch',fetch,{'retries':3}),('inventory',inventory,{}),('identify',identify,{'optional':True,'retries':0}),('style',style,{'optional':True,'retries':1}),('style_ai',style_ai,{'optional':True,'retries':0}),('beat',beat,{'retries':1}),('scan',scan,{}),
                            ('plan',plan,{}),('edl',edl,{'retries':4}),('watermark',watermark,{'optional':True,'retries':1}),('cards',cards,{}),('grade',grade,{'optional':True,'retries':1}),
                            ('render',render,{'retries':3}),('assemble',assemble,{}),('qa',qa,{'retries':1}),('verify_output',verify_output,{'retries':0}),('export',export,{'optional':True,'retries':0})):
             m.stage(name,fn,**kw)
-        extra=f"Video: {S['out']}\nPlayer: {S['player']} / {S['club']} | plan: {'known-good (reproduced)' if S['known'] else 'AI/heuristic planner'} | final length {S['final_len']} s"
+        sty=S.get('style') or {}; extra=f"Video: {S['out']}\nSources: {len(S['srcs'])} | title: {S['player']} / {S['club'] or '-'} ({S['identity']}) | style: {sty.get('source','?')} - {str(sty.get('describe',''))[:160]}\nPlayer: {S['player']} / {S['club']} | plan: {'known-good (reproduced)' if S['known'] else 'AI/heuristic planner'} | final length {S['final_len']} s"
         status='SUCCESS' if not m.unsolved else 'SUCCESS WITH WARNINGS'; m.notify('success',f'[Video pipeline] {status}',m.summary_text(status,extra))
         sg=m.suggest()
         if sg: m.notify('notice','[Video pipeline] Upgrade suggestions (need your approval, nothing applied)','\n'.join(' - '+x for x in sg))

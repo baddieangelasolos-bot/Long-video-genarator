@@ -7,6 +7,16 @@ WORK=os.environ.get('WORK_DIR','/home/claude/work'); PIPE=os.environ.get('PIPE_D
 REJECT_FLAGS={'blur','referee_bench','foul','player_lost_ball','net_mesh','internal_cut'}
 INTRO_ORDER=['bus','tunnel','aerial','locker','crest','trophy','warmup']
 PREF={'close':12,'medium':8,'wide':9,'face':8}
+def _json(path,default):
+    try: return json.load(open(path))
+    except Exception: return default
+STYLE=_json(PIPE+'/style.json',{}); CFG=_json(PIPE+'/config.json',{}); FPS=int(CFG.get('fps',30)); MINB=7; SLOW=STYLE.get('slow','some'); WIDE_CAP=float(STYLE.get('wide_share_max',0.25))
+def setup_style(P):
+    """Beats per clip from the style: min clip length (3.0 s default, shorter if the reference cuts faster) and preferred length scaled to the reference's median shot."""
+    global MINB
+    MINB=max(3,math.ceil((float(STYLE.get('min_clip_s',3.0))*FPS+1)/(P*FPS)))
+    sc=float(STYLE.get('pref_scale',1.0))
+    for k in list(PREF): PREF[k]=max(MINB,int(round(PREF[k]*sc)))
 CLASS_MAP={'close_dribble':'close','close_skill':'close','medium_action':'medium','wide_goal':'wide','face':'face','celebration':'celebration','medal':'celebration','pre_match':'intro'}
 def load_rows(srcs):
     rows=[]
@@ -68,8 +78,10 @@ def build_candidates(rows,cl,fps):
     return C
 def fit(c,b_pref,P,floor_override=None):
     floor=1.0 if c['group']=='wide' else (0.6 if c['fps']>=50 else 0.8)
+    if SLOW=='none': floor=1.0
+    elif SLOW=='heavy' and c['group']!='wide': floor=min(floor,0.5)
     if floor_override: floor=floor_override
-    for b in range(b_pref,6,-1):
+    for b in range(b_pref,MINB-1,-1):
         need=b*P; sp=min(1.0,c['avail']/need); sp=math.floor(sp*100)/100
         if sp>=floor: return b,sp
     return None
@@ -90,37 +102,38 @@ def rebalance(items,P,target,notes,label):
         guard+=1; moved=False
         for r,c in (items if diff>0 else items[::-1]):
             nb=r[5]+(1 if diff>0 else -1)
-            if nb<7: continue
+            if nb<MINB: continue
             f=fit(c,nb,P)
             if f and f[0]==nb: r[5]=nb; r[4]=f[1]; diff+=-1 if diff>0 else 1; moved=True
             if diff==0: break
         if not moved: break
     if diff!=0: notes.append(f'{label} beat remainder {diff} (not enough room in the chosen windows)')
 def select(C,P,final_len,notes):
-    total=int(final_len/P); intro_b=int(round(min(17.4,0.12*final_len)/P)); fin_b=int(round(min(26.5,0.18*final_len)/P)); body_b=total-intro_b-fin_b
+    total=int(final_len/P); intro_b=int(round(min(17.4,0.12*final_len)/P)); fin_b=int(round(min(26.5,0.18*final_len)/P)); body_b=total-intro_b-fin_b   # body_b is recomputed after intro/finale are built
     used=set(); prev=None
     # intro
     pool=[c for c in C if c['group']=='intro']; order={k:i for i,k in enumerate(INTRO_ORDER)}; pool.sort(key=lambda c:(order.get(c['kind'],99),-c['q']))
     n=max(1,intro_b//8); base=intro_b//n; lens=[base]*n; lens[-1]+=intro_b-base*n; intro=[]
     for k,L in enumerate(lens,1):
         c=next((x for x in pool if x['id'] not in used and fit(x,L,P)),None)
-        if not c: c=next((x for x in pool if x['id'] not in used and fit(x,7,P)),None)
+        if not c: c=next((x for x in pool if x['id'] not in used and fit(x,MINB,P)),None)
         if not c: notes.append('intro shortfall: not enough pre-match clips'); break
-        b,sp=fit(c,L,P) or fit(c,7,P); used.add(c['id']); intro.append([row_of(c,b,sp,f'i{k}','intro',1.0,0.5),c]); prev=c['src']
+        b,sp=fit(c,L,P) or fit(c,MINB,P); used.add(c['id']); intro.append([row_of(c,b,sp,f'i{k}','intro',1.0,0.5),c]); prev=c['src']
     rebalance(intro,P,intro_b,notes,'intro')
     # finale
-    fpool=[c for c in C if c['group']=='celebration']; fin=[]; targets=([13]+[7]*4)[:max(0,min(5,fin_b//8-1))]
+    fpool=[c for c in C if c['group']=='celebration']; fin=[]; targets=([MINB+6]+[MINB]*4)[:max(0,min(5,fin_b//8-1))]
     for k,L in enumerate(targets,1):
         c,f=take(fpool,used,None,L,P)
         if not c: break
         b,sp=f; used.add(c['id']); fin.append([row_of(c,b,sp,f'f{k}','finale'),c])
-    rest=fin_b-sum(r[5] for r,c in fin); c,f=take(fpool,used,None,max(rest,7),P,0.55)
+    rest=fin_b-sum(r[5] for r,c in fin); c,f=take(fpool,used,None,max(rest,MINB),P,0.55)
     if c: b,sp=f; used.add(c['id']); fin.append([row_of(c,b,sp,f'f{len(fin)+1}','finale'),c])
     else: notes.append('finale shortfall: not enough celebration clips')
     rebalance(fin,P,fin_b,notes,'finale')
+    body_b=total-sum(r[5] for r,c in intro)-sum(r[5] for r,c in fin)    # missing intro/finale footage is filled by the body instead of leaving a hole
     # body
     pools={g:[c for c in C if c['group']==g] for g in ('close','medium','wide','face')}
-    cap={'wide':0.25,'face':0.2}; beats={g:0 for g in pools}; seq=['close','close','wide','medium','close','face','close','wide','medium','close','face']; i=0; body=[]; bsum=0; guard=0; prev=None
+    cap={'wide':WIDE_CAP,'face':0.2}; beats={g:0 for g in pools}; seq=['close','close','wide','medium','close','face','close','wide','medium','close','face']; i=0; body=[]; bsum=0; guard=0; prev=None
     while bsum<body_b and guard<400:
         guard+=1; g=seq[i%len(seq)]; i+=1; picked=None
         for gg in [g]+[x for x in ('close','medium','wide','face') if x!=g]:
@@ -128,7 +141,7 @@ def select(C,P,final_len,notes):
             c,f=take(pools[gg],used,prev,PREF[gg],P)
             if c: picked=(gg,c,f); break
         if not picked:
-            c,f=take([x for v in pools.values() for x in v if not(x['group'] in cap and beats[x['group']]+7>cap[x['group']]*body_b)],used,prev,7,P)
+            c,f=take([x for v in pools.values() for x in v if not(x['group'] in cap and beats[x['group']]+MINB>cap[x['group']]*body_b)],used,prev,MINB,P)
             if not c: break
             picked=(c['group'],c,f)
         gg,c,(b,sp)=picked; used.add(c['id']); beats[gg]+=b; bsum+=b; prev=c['src']; body.append([row_of(c,b,sp,f'n{len(body)+1:02d}','body'),c])
@@ -139,8 +152,9 @@ def select(C,P,final_len,notes):
     for sec,items in (('intro',intro),('body',body),('finale',fin)): pass
     return [r for r,c in intro+body+fin], dict(total=total,intro=intro_b,body=body_b,finale=fin_b,wide_share=round(wide/max(bsum,1),3),face_share=round(face/max(bsum,1),3))
 def main():
-    player=sys.argv[1] if len(sys.argv)>1 else 'the player'; b=json.load(open(PIPE+'/beat.json')); P=b['P']; final_len=float(os.environ.get('FINAL_LEN') or math.floor(b['end']*2)/2)
-    info=json.load(open(WORK+'/analysis/src_info.json')); srcs=[s for s in ('gal','dor','rma') if s in info]; rows=load_rows(srcs); notes=[]
+    player=sys.argv[1] if len(sys.argv)>1 else 'the player'; b=json.load(open(PIPE+'/beat.json')); P=b['P']; final_len=float(os.environ.get('FINAL_LEN') or math.floor(b['end']*2)/2); setup_style(P)
+    if player.upper() in ('HIGHLIGHTS','UNKNOWN',''): player='the main player in the footage'
+    info=json.load(open(WORK+'/analysis/src_info.json')); srcs=sorted(info); rows=load_rows(srcs); notes=[]
     durs={s:info[s]['dur'] for s in srcs}; fps={s:info[s]['fps'] for s in srcs}
     cl={}
     if os.environ.get('USE_AI','1')=='1':
@@ -151,7 +165,16 @@ def main():
     miss=[r for r in rows if r['id'] not in cl]
     if miss:
         loc=classify_local(miss,durs); cl.update(loc); notes.append(f'DEGRADED: {len(miss)} of {len(rows)} shots classified by the local heuristic (no vision). Human review of the result is recommended.')
-    C=build_candidates(rows,cl,fps); clips,stats=select(C,P,final_len,notes)
+    C=build_candidates(rows,cl,fps); target=final_len; OFF=b['OFF']
+    while True:      # not enough usable footage for the full music length -> make the video shorter instead of failing
+        tn=[]; clips,stats=select(C,P,final_len,tn)
+        bad=any(n.startswith('BODY SHORTFALL') for n in tn) or stats['wide_share']>WIDE_CAP+1e-9      # too little footage, or the few clips would break the wide-shot cap
+        if not bad or final_len<=12: break
+        final_len=max(12.0,round(final_len-max(2.0,final_len*0.1),1))
+    notes+=tn
+    if final_len<target:
+        tb=sum(r[5] for r in clips); fr=lambda k:int(round((OFF+P*k)*FPS)); final_len=round((fr(tb)-fr(0))/FPS*2)/2
+        notes.append(f'SHORTER VIDEO: only enough usable footage for {final_len}s of the {target}s music length (add more source videos for a full-length edit)')
     json.dump(dict(final_len=final_len,clips=clips),open(PIPE+'/edl_input.json','w')); json.dump(dict(stats=stats,notes=notes,classified_by_ai=len(cl)-len(miss),total_rows=len(rows)),open(WORK+'/analysis/plan_notes.json','w'),indent=1)
     print('plan:',stats,'| notes:',notes[-3:])
 if __name__=='__main__': main()
