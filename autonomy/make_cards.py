@@ -25,5 +25,5 @@ def layer(texts,W=1920,H=1080,grad=False):
 if __name__=='__main__':
     name,club,out=sys.argv[1].upper(),sys.argv[2].upper(),sys.argv[3]; os.makedirs(out,exist_ok=True)
     size=104 if len(name)<=14 else max(60,int(104*14/len(name)))
-    layer([(name,size,455,22,(255,255,255,255)),(club,36,585,14,(225,225,235,235))]).save(out+'/title.png')
+    layer([(name,size,455 if club else 500,22,(255,255,255,255))]+([(club,36,585,14,(225,225,235,235))] if club else [])).save(out+'/title.png')
     layer([('THANKS FOR WATCHING',80,820,16,(255,255,255,255))],grad=True).save(out+'/endcard.png'); print('cards written to',out)
