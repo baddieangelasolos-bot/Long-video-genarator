@@ -21,6 +21,8 @@ def is_audio(f): return str(f.get('mime','')).startswith('audio/') or f.get('nam
 def plan_from_drive():
     import drive_export as DE
     r=DE.call('list_sources')
+    if r.get('error')=='unauthorized':
+        raise SystemExit('[fetch] Apps Script answered "unauthorized": the WEBHOOK_TOKEN GitHub secret does not match the WEBHOOK_TOKEN Script Property of the deployment behind APPS_SCRIPT_URL. Fix the secret (value only, no spaces or label) or run showToken in Apps Script. Code was NOT the problem.')
     if not r.get('ok') or 'video' not in r:
         raise SystemExit('[fetch] Apps Script did not return list_sources ('+str(r.get('error','unknown event'))+'). Paste the NEW docs/Code_v2_upload.gs into Apps Script and Deploy > Manage deployments > Edit > New version.')
     vids=[f for f in r['video'] if is_video(f) and f.get('size',0)>0]; auds=[f for f in r['audio'] if is_audio(f) and f.get('size',0)>0]; refs=[f for f in r['reference'] if is_video(f) and f.get('size',0)>0]

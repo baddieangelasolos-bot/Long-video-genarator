@@ -57,7 +57,8 @@ def ping():
     """Preflight: checks URL form, token, deployment version and Drive session creation. Creates no file."""
     if not (os.environ.get('APPS_SCRIPT_URL') and os.environ.get('WEBHOOK_TOKEN')): log('APPS_SCRIPT_URL / WEBHOOK_TOKEN not set'); return 1
     j=call('ping')
-    if not j.get('pong'): log('ping refused:',j.get('error')); return 1
+    if not j.get('pong'):
+        log('ping refused:',j.get('error'),('| The Apps Script URL works but the WEBHOOK_TOKEN GitHub secret does not match the token in Apps Script (Project Settings > Script Properties > WEBHOOK_TOKEN). Copy ONLY the token value, no spaces, no label.' if j.get('error')=='unauthorized' else '')); return 1
     i=call('upload_init',name='preflight_check.mp4',size=1)
     if not i.get('ok'): log('deployment is answering but cannot start a Drive upload:',i.get('error'),'- paste Code_v2_upload.gs, then Deploy > Manage deployments > Edit > New version, and re-authorise'); return 1
     if not host_ok(str(i.get('session',''))): log('session host unexpected'); return 1
