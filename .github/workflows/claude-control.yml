@@ -13,10 +13,11 @@ concurrency:
 
 jobs:
   run:
+    if: github.actor == github.repository_owner
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Execute command
         env:
