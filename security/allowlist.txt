@@ -1,0 +1,3 @@
+# paths the scanner skips (fnmatch)
+security/*
+docs/Code_v*.gs

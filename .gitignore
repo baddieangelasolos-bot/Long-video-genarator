@@ -1,0 +1,13 @@
+*.mp4
+*.mov
+*.m4a
+*.npy
+*.wav
+*.env
+.env*
+*.pem
+*.key
+*.log
+__pycache__/
+work/
+build/
