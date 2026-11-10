@@ -1,0 +1,42 @@
+name: security-guard
+# Scans every push / pull request / week for exposed keys, tokens, webhooks, e-mail addresses and Drive ids (current files AND git history).
+# On a finding: red check + alert e-mail with a DONE button (opens the owner-only remediation workflow).
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: security-guard-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan files and history
+        id: scan
+        run: |
+          rc=0; python3 security/scan_secrets.py --history --json /tmp/findings.json || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Red alert e-mail
+        if: (steps.scan.outputs.rc == '1' || (steps.scan.outputs.rc == '2' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        env:
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 security/notify.py /tmp/findings.json
+      - name: Fail the check if anything is exposed in the current files
+        if: steps.scan.outputs.rc == '1'
+        run: |
+          echo "Exposed information found. See the scan step (values are masked) and the alert e-mail."
+          exit 1

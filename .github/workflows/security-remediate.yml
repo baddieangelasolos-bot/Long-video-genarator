@@ -1,0 +1,35 @@
+name: security-remediate
+# OWNER ONLY. Started by the DONE button in the alert e-mail (it opens this page; tap Run workflow).
+# Removes exposed values from the code, switches the code to the repository secret you created, verifies, and pushes.
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: security-remediate
+  cancel-in-progress: false
+jobs:
+  fix:
+    if: github.actor == github.repository_owner && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Fix code to use your secrets
+        id: fix
+        env:
+          SECRETS_JSON: ${{ toJSON(secrets) }}
+        run: python3 security/remediate.py
+      - name: Commit and push the clean code
+        if: always() && steps.fix.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "security: remove exposed values, use repository secrets"
+          git push
+      - name: Reminder
+        if: always()
+        run: echo "Removing a value from the code does not remove it from old commits. Revoke the OLD key and use a NEW one."
