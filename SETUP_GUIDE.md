@@ -15,7 +15,7 @@ Repo: baddieangelasolos-bot/Long-video-genarator (private).
 ## 2. Apps Script (alerts + Drive export)
 1. script.google.com > New project > delete the sample > paste docs/Code_v2_upload.gs > Save.
 2. Run `initialSetup` (grant permission: Advanced > Go to project). Copy WEBHOOK_TOKEN from View > Execution log.
-3. Optional: pin the export folder: run `setOutputsFolder('1Sdko5QqZAnuKujGMCZYqiqeGjLG5oIUv')` (edit the id in the call, run once). `showOutputsFolder` confirms.
+3. Optional: pin the export folder: run `setOutputsFolder('<YOUR_DRIVE_FOLDER_ID>')` (edit the id in the call, run once). `showOutputsFolder` confirms.
 4. Deploy > New deployment > Web app > Execute as: Me; Who has access: Anyone > copy the /exec URL.
 5. After any later code edit: Deploy > Manage deployments > Edit > New version.
 
