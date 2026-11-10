@@ -9,7 +9,7 @@ import json, os, re, sys, time, hashlib
 HERE=os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0,HERE)
 DEST=os.environ.get('SRC_DIR','/home/claude/work/src'); MAXSRC=int(os.environ.get('FETCH_MAX_SOURCES','12')); SLEEP=float(os.environ.get('RELAY_RETRY_SLEEP','20'))
 VID_EXT=('.mp4','.mov','.m4v','.mkv','.webm','.avi','.mts','.mpg','.mpeg'); AUD_EXT=('.m4a','.mp3','.wav','.aac','.flac','.ogg','.opus','.wma')
-BUILTIN=[["gal.mp4","1h5Q1aHNXMWDBo_qR-Kmp5OpTZqtHBrwF",125795124],["dor.mp4","11WovlOWIZbhjTZBwbIPFd3U5SWG3Uvid",273754662],["rma.mp4","1zl87D_E0h5ogGCUINr_29ivNmZxr7Pp2",344812952],["music.m4a","1XaLWyDqyGj-wTlgB04Sxv7j9oKTrF5hc",2612210],["ref.mp4","13D83SMPio2H9LWn4vWeI0ZBYJaXvWkbZ",35303250]]
+BUILTIN=json.loads(os.environ.get('BUILTIN_FILES_JSON') or '[]')   # legacy fixed files: supplied only through the BUILTIN_FILES_JSON secret, never stored in the repo
 def log(*a): print('[fetch]',*a,flush=True)
 def sha(p):
     h=hashlib.sha256()

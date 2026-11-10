@@ -3,8 +3,8 @@
 env: MAIL_USER MAIL_APP_PASSWORD MAIL_TO(optional) RUN_URL JOB_STATUS PIPELINE_OUTCOME  ; EMAIL_LOGS_DRYRUN=1 writes /tmp/email_logs.eml instead of sending"""
 import os, io, glob, zipfile, smtplib, ssl
 from email.message import EmailMessage
-W=os.environ.get('WORK_DIR','/home/claude/work'); DEFAULT_TO='baddie.angelasolos@gmail.com'
-SECRETS=[v for k in ('APPS_SCRIPT_URL','WEBHOOK_TOKEN','GEMINI_API_KEY','MAIL_APP_PASSWORD','GH_TOKEN') for v in [os.environ.get(k,'')] if len(v)>=8]
+W=os.environ.get('WORK_DIR','/home/claude/work')
+SECRETS=[v for k in ('APPS_SCRIPT_URL','WEBHOOK_TOKEN','GEMINI_API_KEY','MAIL_APP_PASSWORD','GH_TOKEN','MAIL_TO','MAIL_USER') for v in [os.environ.get(k,'')] if len(v)>=8]
 def red(b):
     t=b.decode('utf-8','replace')
     for v in SECRETS: t=t.replace(v,'***')
@@ -13,7 +13,7 @@ def main():
     job=os.environ.get('JOB_STATUS',''); outc=os.environ.get('PIPELINE_OUTCOME',''); exp_failed=os.path.exists(W+'/build/export_failed')
     problem=job!='success' or outc!='success' or exp_failed
     if not problem and os.environ.get('EMAIL_LOGS_ALWAYS')!='1': print('[email_logs] run was clean, nothing to send'); return 0
-    user,pw=os.environ.get('MAIL_USER'),os.environ.get('MAIL_APP_PASSWORD'); to=os.environ.get('MAIL_TO') or user or DEFAULT_TO
+    user,pw=os.environ.get('MAIL_USER'),os.environ.get('MAIL_APP_PASSWORD'); to=os.environ.get('MAIL_TO') or user
     files=sorted(set(glob.glob(W+'/*.log')+glob.glob(W+'/build/*.log')+glob.glob(W+'/analysis/*.json')+glob.glob(W+'/proposals/*')))
     buf=io.BytesIO(); n=0
     with zipfile.ZipFile(buf,'w',zipfile.ZIP_DEFLATED) as z:
