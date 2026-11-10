@@ -19,39 +19,39 @@ on:
   repository_dispatch:
     types: [ingest-media]
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: ingest-drive
   cancel-in-progress: false
 jobs:
   build:
+    if: github.actor == github.repository_owner
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
       TAG: ${{ inputs.tag || github.event.client_payload.tag || 'v1.0.0' }}
       PURGE_ALL: ${{ inputs.purge_all || github.event.client_payload.purge_all || 'true' }}
       RELAY_FILES_JSON: ${{ inputs.files_json || (github.event.client_payload.files && toJSON(github.event.client_payload.files)) || '' }}
-      GH_TOKEN: ${{ github.token }}
       WORK_DIR: /home/claude/work
       SRC_DIR: /home/claude/work/src
       PIPE_DIR: ${{ github.workspace }}/pipeline
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
-      WEBHOOK_TOKEN: ${{ secrets.WEBHOOK_TOKEN }}
-      MAIL_USER: ${{ secrets.MAIL_USER }}
-      MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
-      MAIL_TO: ${{ secrets.MAIL_TO }}
       PLAYER_NAME: ${{ vars.PLAYER_NAME || '' }}
       CLUB_NAME: ${{ vars.CLUB_NAME || '' }}
       USE_AI: ${{ vars.USE_AI || '1' }}
       RENDER_PRESET: medium
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Validate inputs
         run: |
           [[ "$TAG" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { echo "bad tag"; exit 1; }
           [[ "$PURGE_ALL" == "true" || "$PURGE_ALL" == "false" ]] || { echo "purge_all must be true/false"; exit 1; }
       - name: Clean slate (old releases, assets, tags)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "$PURGE_ALL" = "true" ]; then
@@ -60,7 +60,7 @@ jobs:
               gh release delete "$t" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY"
             done
           fi
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
           cache: pip
@@ -86,6 +86,14 @@ jobs:
           mkdir -p /home/claude/work/src /home/claude/work/build
       - name: Run the supervised pipeline (Mechanic)
         id: pipeline
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          WEBHOOK_TOKEN: ${{ secrets.WEBHOOK_TOKEN }}
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          BUILTIN_FILES_JSON: ${{ secrets.BUILTIN_FILES_JSON }}
         run: python autonomy/run_pipeline.py
       - name: Step summary and exit status
         if: always()
@@ -94,7 +102,6 @@ jobs:
             echo "### Highlight pipeline"
             echo "outcome: ${{ steps.pipeline.outcome }}"
             ls -la /home/claude/work/build/*.mp4 2>/dev/null || echo "no video produced"
-            [ -f /home/claude/work/alerts.log ] && { echo '```'; tail -40 /home/claude/work/alerts.log; echo '```'; }
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Collect logs and proposals
         if: always()
@@ -104,17 +111,17 @@ jobs:
           cp /home/claude/work/build/*.log /home/claude/out/ 2>/dev/null || true
           cp -r /home/claude/work/proposals /home/claude/out/ 2>/dev/null || true
           cp /home/claude/work/analysis/*.json /home/claude/out/ 2>/dev/null || true
-      - name: Upload logs (always)
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Upload logs (private repo only)
+        if: always() && github.event.repository.private
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pipeline-logs
           path: /home/claude/out
           retention-days: 14
           if-no-files-found: ignore
-      - name: Upload final video as artifact (always kept)
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Upload final video as artifact (private repo only)
+        if: always() && github.event.repository.private
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: final-video
           path: /home/claude/work/build/*_Highlights.mp4
@@ -122,7 +129,9 @@ jobs:
           compression-level: 0
           if-no-files-found: ignore
       - name: Fallback release asset (only if the Drive export failed or is not configured)
-        if: always() && steps.pipeline.outcome == 'success'
+        if: always() && steps.pipeline.outcome == 'success' && github.event.repository.private
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ -f /home/claude/work/build/export_failed ]; then
@@ -133,6 +142,12 @@ jobs:
       - name: Email logs on any failure
         if: always()
         env:
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          WEBHOOK_TOKEN: ${{ secrets.WEBHOOK_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           JOB_STATUS: ${{ job.status }}
           PIPELINE_OUTCOME: ${{ steps.pipeline.outcome }}
