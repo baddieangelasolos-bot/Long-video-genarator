@@ -41,9 +41,10 @@ jobs:
       MAIL_USER: ${{ secrets.MAIL_USER }}
       MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
       MAIL_TO: ${{ secrets.MAIL_TO }}
-      PLAYER_NAME: ${{ vars.PLAYER_NAME || 'LAMINE YAMAL' }}
-      CLUB_NAME: ${{ vars.CLUB_NAME || 'FC BARCELONA' }}
+      PLAYER_NAME: ${{ vars.PLAYER_NAME || '' }}
+      CLUB_NAME: ${{ vars.CLUB_NAME || '' }}
       USE_AI: ${{ vars.USE_AI || '1' }}
+      RENDER_PRESET: medium
     steps:
       - uses: actions/checkout@v4
       - name: Validate inputs
@@ -136,4 +137,5 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           PIPELINE_OUTCOME: ${{ steps.pipeline.outcome }}
         run: python3 autonomy/email_logs.py
+
           
