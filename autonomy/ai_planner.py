@@ -10,10 +10,11 @@ PREF={'close':12,'medium':8,'wide':9,'face':8}
 def _json(path,default):
     try: return json.load(open(path))
     except Exception: return default
-STYLE=_json(PIPE+'/style.json',{}); CFG=_json(PIPE+'/config.json',{}); FPS=int(CFG.get('fps',30)); MINB=7; SLOW=STYLE.get('slow','some'); WIDE_CAP=float(STYLE.get('wide_share_max',0.25))
+STYLE=_json(PIPE+'/style.json',{}); CFG=_json(PIPE+'/config.json',{}); FPS=int(CFG.get('fps',30)); MINB=7; PBEAT=0; LAST_WIDE=[]; MAXSPLIT=int(os.environ.get('MAX_SPLIT','5')); SLOW=STYLE.get('slow','some'); WIDE_CAP=float(STYLE.get('wide_share_max',0.25))
 def setup_style(P):
     """Beats per clip from the style: min clip length (3.0 s default, shorter if the reference cuts faster) and preferred length scaled to the reference's median shot."""
-    global MINB
+    global MINB,PBEAT
+    PBEAT=P
     MINB=max(3,math.ceil((float(STYLE.get('min_clip_s',3.0))*FPS+1)/(P*FPS)))
     sc=float(STYLE.get('pref_scale',1.0))
     for k in list(PREF): PREF[k]=max(MINB,int(round(PREF[k]*sc)))
@@ -74,7 +75,17 @@ def build_candidates(rows,cl,fps):
         if not c or c['quality']<3 or set(c['flags'])&REJECT_FLAGS: continue
         group=CLASS_MAP.get(c['cls'])
         if c['cls'] in ('wide_other','medium_idle','reject') or group is None: continue
-        C.append(dict(id=r['id'],src=r['src'],s=r['s'],e=r['e'],avail=r['e']-r['s']-0.05,group=group,kind=c['kind'],q=c['quality'],fps=fps[r['src']],motion=r['motion']))
+        base=dict(id=r['id'],src=r['src'],s=r['s'],e=r['e'],avail=r['e']-r['s']-0.05,group=group,kind=c['kind'],q=c['quality'],fps=fps[r['src']],motion=r['motion'],k=0)
+        # A long shot can supply several clips (different parts of it), so a few long shots are enough for a full-length edit.
+        # Only body groups are split; windows never overlap and stay inside the shot (no hard cut inside).
+        if group in ('close','medium','wide','face') and PBEAT:
+            sub=PREF[group]*PBEAT+0.1; n=max(1,min(MAXSPLIT,int((r['e']-r['s'])//sub)))
+            if n>1:
+                seg=(r['e']-r['s'])/n
+                for k in range(n):
+                    d=dict(base); d['id']='%s.%d'%(r['id'],k); d['s']=r['s']+k*seg; d['avail']=seg-0.05; d['k']=k; d['shot']=r['id']; C.append(d)
+                continue
+        C.append(base)
     return C
 def fit(c,b_pref,P,floor_override=None):
     floor=1.0 if c['group']=='wide' else (0.6 if c['fps']>=50 else 0.8)
@@ -86,7 +97,7 @@ def fit(c,b_pref,P,floor_override=None):
         if sp>=floor: return b,sp
     return None
 def take(pool,used,prev_src,b_pref,P,floor_override=None):
-    cands=sorted([c for c in pool if c['id'] not in used],key=lambda c:(-c['q'],-c['avail']))
+    cands=sorted([c for c in pool if c['id'] not in used],key=lambda c:(-c['q'],c.get('k',0),-c['avail']))
     order=[c for c in cands[:4] if c['src']!=prev_src]+[c for c in cands[:4] if c['src']==prev_src]+cands[4:]
     for c in order:
         f=fit(c,b_pref,P,floor_override)
@@ -149,8 +160,24 @@ def select(C,P,final_len,notes):
     bsum=sum(r[5] for r,c in body)
     if bsum<body_b: notes.append(f'BODY SHORTFALL {bsum}/{body_b} beats: not enough usable clips; human review or more footage needed')
     wide=sum(r[5] for r,c in body if c['group']=='wide'); face=sum(r[5] for r,c in body if c['group']=='face')
-    for sec,items in (('intro',intro),('body',body),('finale',fin)): pass
+    global LAST_WIDE; LAST_WIDE=[r[0] for r,c in body if c['group']=='wide']
     return [r for r,c in intro+body+fin], dict(total=total,intro=intro_b,body=body_b,finale=fin_b,wide_share=round(wide/max(bsum,1),3),face_share=round(face/max(bsum,1),3))
+def plan_loop(C,P,final_len):
+    """Shorten the video in steps until it fits. Last resort: drop surplus wide clips from the body so the protected wide cap holds and the run still finishes."""
+    while True:
+        tn=[]; clips,stats=select(C,P,final_len,tn)
+        bad=any(n.startswith('BODY SHORTFALL') for n in tn) or stats['wide_share']>WIDE_CAP+1e-9
+        if not bad or final_len<=12: break
+        final_len=max(12.0,round(final_len-max(2.0,final_len*0.1),1))
+    if stats['wide_share']>WIDE_CAP+1e-9:
+        wide_ids=set(LAST_WIDE)
+        body=[r for r in clips if r[1]=='body']
+        while body and sum(r[5] for r in body if r[0] in wide_ids)>WIDE_CAP*sum(r[5] for r in body)+1e-9:
+            w=[r for r in body if r[0] in wide_ids]; r=w[-1]; clips.remove(r); body.remove(r)
+        bs=max(1,sum(r[5] for r in body)); stats['wide_share']=round(sum(r[5] for r in body if r[0] in wide_ids)/bs,3)
+        tn.append('WIDE CAP: not enough close-up footage, surplus wide clips were dropped (video shorter)')
+        final_len=max(final_len,0)   # real length is recomputed from the kept beats by the caller
+    return final_len,clips,stats,tn
 def main():
     player=sys.argv[1] if len(sys.argv)>1 else 'the player'; b=json.load(open(PIPE+'/beat.json')); P=b['P']; final_len=float(os.environ.get('FINAL_LEN') or math.floor(b['end']*2)/2); setup_style(P)
     if player.upper() in ('HIGHLIGHTS','UNKNOWN',''): player='the main player in the footage'
@@ -166,13 +193,9 @@ def main():
     if miss:
         loc=classify_local(miss,durs); cl.update(loc); notes.append(f'DEGRADED: {len(miss)} of {len(rows)} shots classified by the local heuristic (no vision). Human review of the result is recommended.')
     C=build_candidates(rows,cl,fps); target=final_len; OFF=b['OFF']
-    while True:      # not enough usable footage for the full music length -> make the video shorter instead of failing
-        tn=[]; clips,stats=select(C,P,final_len,tn)
-        bad=any(n.startswith('BODY SHORTFALL') for n in tn) or stats['wide_share']>WIDE_CAP+1e-9      # too little footage, or the few clips would break the wide-shot cap
-        if not bad or final_len<=12: break
-        final_len=max(12.0,round(final_len-max(2.0,final_len*0.1),1))
+    final_len,clips,stats,tn=plan_loop(C,P,final_len)
     notes+=tn
-    if final_len<target:
+    if final_len<target or any(n.startswith('WIDE CAP') for n in tn):
         tb=sum(r[5] for r in clips); fr=lambda k:int(round((OFF+P*k)*FPS)); final_len=round((fr(tb)-fr(0))/FPS*2)/2
         notes.append(f'SHORTER VIDEO: only enough usable footage for {final_len}s of the {target}s music length (add more source videos for a full-length edit)')
     json.dump(dict(final_len=final_len,clips=clips),open(PIPE+'/edl_input.json','w')); json.dump(dict(stats=stats,notes=notes,classified_by_ai=len(cl)-len(miss),total_rows=len(rows)),open(WORK+'/analysis/plan_notes.json','w'),indent=1)
