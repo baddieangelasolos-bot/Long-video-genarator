@@ -76,6 +76,13 @@ def main():
             m.notices.append('reference style analysis failed, default style used: '+str(e)[:100]); sys.path.insert(0,HERE); import ai_director as D; json.dump(D.DEFAULT_STYLE,open(PIPE+'/style.json','w'),indent=1)
         try: S['style']=json.load(open(PIPE+'/style.json'))
         except Exception: S['style']={}
+        ue=(S.get('style') or {}).get('unrecognized_effects') or []
+        if ue:
+            m.notices.append('effects seen in the reference that this pipeline cannot reproduce: '+'; '.join(ue))
+            S.setdefault('sug',[]).append('Reference effects not reproducible yet (upload example clips or descriptions to the effects folder and ask Claude to add them): '+'; '.join(ue))
+            m.notify('notice','[Video pipeline] Reference effects I could not reproduce','These effects or transitions appear in the reference but are not in the pipeline vocabulary (hard cut, white/black flash, RGB split, zoom punch, fade, invert flash, blur pulse):\n - '+'\n - '.join(ue)+'\nUpload examples to the effects folder in Drive, then ask Claude to add them as new render tools.')
+        elif S.get('style',{}).get('source')=='reference' and not (S['style'].get('gemini')):
+            S.setdefault('sug',[]).append('Gemini could not watch the reference this run, so effects were measured only (cuts, flashes, colour). Re-run when Gemini is available.')
     def beat():
         res=[]
         def one(lo,hi):
@@ -113,7 +120,14 @@ def main():
         py(PIPE+'/shots2.py',*S['srcs'],cwd=PIPE,timeout=3000)
         py(HERE+'/ai_planner.py',S['player'],cwd=PIPE,env={'PIPE_DIR':PIPE},timeout=3000)
         n=json.load(open(WORK+'/analysis/plan_notes.json')); m.notices+=[x for x in n['notes'] if 'shortfall' in x.lower() or 'DEGRADED' in x or 'SHORTER VIDEO' in x]
-        try: S['final_len']=json.load(open(PIPE+'/edl_input.json'))['final_len']      # the planner may shorten the video when footage is short
+        S.setdefault('sug',[]).extend(n.get('suggestions',[]))
+        try: S['final_len']=json.load(open(PIPE+'/edl_input.json'))['final_len']      # (planner may shorten)
+        except Exception: pass
+        tgt=n.get('target') or 0
+        if os.environ.get('ALLOW_SHORT')!='1' and tgt and S.get('final_len') and S['final_len']<0.85*tgt:
+            sp=n.get('supply_seconds',{})
+            raise M.Halt(f"NEEDS MORE SOURCE VIDEO. Usable footage only covers {S['final_len']}s of the {tgt}s music. Usable seconds found: {sp}. Needed: roughly {n.get('need_nonwide_s')}s of non-wide footage (close-ups, dribbling, skills) plus pre-match and celebration clips. "+' | '.join(n.get('suggestions',[]))+" WHAT TO DO: upload more clips to the source video folder in Drive, then open this run in GitHub Actions and tap Re-run failed jobs (or run the workflow again). Files are re-read from Drive on every run.")
+        try: pass      # the planner may shorten the video when footage is short
         except Exception: pass
     def edl(): py(PIPE+'/edl.py',cwd=PIPE)
     def watermark():
@@ -158,8 +172,12 @@ def main():
             m.stage(name,fn,**kw)
         sty=S.get('style') or {}; extra=f"Video: {S['out']}\nSources: {len(S['srcs'])} | title: {S['player']} / {S['club'] or '-'} ({S['identity']}) | style: {sty.get('source','?')} - {str(sty.get('describe',''))[:160]}\nPlayer: {S['player']} / {S['club']} | plan: {'known-good (reproduced)' if S['known'] else 'AI/heuristic planner'} | final length {S['final_len']} s"
         status='SUCCESS' if not m.unsolved else 'SUCCESS WITH WARNINGS'; m.notify('success',f'[Video pipeline] {status}',m.summary_text(status,extra))
-        sg=m.suggest()
-        if sg: m.notify('notice','[Video pipeline] Upgrade suggestions (need your approval, nothing applied)','\n'.join(' - '+x for x in sg))
+        sg=m.suggest(extra=S.get('sug',[]))
+        try:
+            rf=json.load(open(PIPE+'/style_profile.json')).get('fps'); mx=max(i['fps'] for i in json.load(open(WORK+'/analysis/src_info.json')).values())
+            if rf and mx and rf>mx+5: sg.append(f'Reference is {rf:.0f} fps but your footage is {mx:.0f} fps: the output follows the footage; true {rf:.0f} fps smoothness needs {rf:.0f} fps source clips.')
+        except Exception: pass
+        m.notify('notice','[Video pipeline] Suggestions after this run (nothing applied)','\n'.join(' - '+x for x in sg) if sg else 'No suggestions this run.')
         return 0
     except M.Halt as e:
         m.notify('failure','[Video pipeline] HALTED: needs you',m.summary_text('HALTED',f'Reason: {e}')); return 1
