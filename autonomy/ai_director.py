@@ -83,7 +83,7 @@ Use only these words. Answer ONLY JSON:
  "transitions":[{"type":"hard_cut|flash_white|flash_black|rgb_split|zoom_punch|fade_black|invert_flash|blur_pulse","share":0.0}],
  "zoom_push_in":true,"slow_motion":"none|some|heavy","speed_ramps":false,"shake":false,
  "overlays":["text_title","end_card","logo","light_leaks","film_grain","none"],
- "pacing":"slow_cinematic|medium|fast_cuts|beat_synced","intro":"one sentence","outro":"one sentence","summary":"two sentences on the overall look and how the cuts and effects are used"}
+ "pacing":"slow_cinematic|medium|fast_cuts|beat_synced","wide_share_percent":0,"unrecognized_effects":["short description of any transition, filter or effect you see that is NOT one of the words above; empty list if none"],"intro":"one sentence","outro":"one sentence","summary":"two sentences on the overall look and how the cuts and effects are used"}
 Measured facts to stay consistent with: {facts}'''
 def merge_style(profile,g):
     st=json.loads(json.dumps(DEFAULT_STYLE)); st['source']='reference'; g=g or {}
@@ -105,6 +105,9 @@ def merge_style(profile,g):
     if effect_total is not None:
         if not tr: tr={'flash_white':1.0,'rgb_split':1.0}
         s=sum(tr.values()) or 1.0; w={k:round(effect_total*v/s,4) for k,v in tr.items()}; w['hard_cut']=round(1-sum(w.values()),4); st['transitions']=w; st['punch_all']=False
+    ws=g.get('wide_share_percent')
+    if isinstance(ws,(int,float)) and 0<float(ws)<=100: st['wide_share_max']=round(min(0.6,max(0.1,float(ws)/100.0)),2)   # wide-shot cap follows the reference (percent of its shots that are wide)
+    st['unrecognized_effects']=[str(x)[:120] for x in (g.get('unrecognized_effects') or []) if str(x).strip() and 'short description' not in str(x)][:8]
     st['zoom_push']=0.05 if g.get('zoom_push_in',True) else 0.0
     st['sharpen']={'soft':0.0,'normal':0.35,'crisp':0.6}.get(g.get('sharpness'),0.4)
     st['slow']=g.get('slow_motion') if g.get('slow_motion') in ('none','some','heavy') else 'some'

@@ -198,6 +198,14 @@ def main():
     if final_len<target or any(n.startswith('WIDE CAP') for n in tn):
         tb=sum(r[5] for r in clips); fr=lambda k:int(round((OFF+P*k)*FPS)); final_len=round((fr(tb)-fr(0))/FPS*2)/2
         notes.append(f'SHORTER VIDEO: only enough usable footage for {final_len}s of the {target}s music length (add more source videos for a full-length edit)')
-    json.dump(dict(final_len=final_len,clips=clips),open(PIPE+'/edl_input.json','w')); json.dump(dict(stats=stats,notes=notes,classified_by_ai=len(cl)-len(miss),total_rows=len(rows)),open(WORK+'/analysis/plan_notes.json','w'),indent=1)
+    sup={g:round(sum(c['avail'] for c in C if c['group']==g)) for g in ('close','medium','wide','face','intro','celebration')}
+    body_s=0.7*target; need_nonwide=round(body_s*(1-WIDE_CAP)); have_nonwide=sup['close']+sup['medium']+sup['face']
+    sug=[]
+    if have_nonwide<1.5*need_nonwide: sug.append(f'Add more close-up / dribbling / skill clips (player large in frame): about {have_nonwide}s usable, a full edit needs roughly {round(1.5*need_nonwide)}s.')
+    if sup['intro']<20: sug.append('Add pre-match clips (bus, tunnel, locker room, aerial, crest, trophy, warm-up) for the intro.')
+    if sup['celebration']<20: sug.append('Add celebration clips for the finale.')
+    if any('intro shortfall' in n for n in tn): sug.append('Intro was short of pre-match clips.')
+    if any(n.startswith('WIDE CAP') for n in tn): sug.append(f'Wide shots were capped at {WIDE_CAP:.0%} (taken from the reference): more close-ups would let the video run longer.')
+    json.dump(dict(final_len=final_len,clips=clips),open(PIPE+'/edl_input.json','w')); json.dump(dict(target=target,supply_seconds=sup,need_nonwide_s=need_nonwide,suggestions=sug,wide_cap=WIDE_CAP,stats=stats,notes=notes,classified_by_ai=len(cl)-len(miss),total_rows=len(rows)),open(WORK+'/analysis/plan_notes.json','w'),indent=1)
     print('plan:',stats,'| notes:',notes[-3:])
 if __name__=='__main__': main()
