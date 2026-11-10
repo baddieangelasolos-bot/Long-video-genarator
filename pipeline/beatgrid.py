@@ -29,12 +29,17 @@ def fit_off(P,a,b,step=0.002):
 _,P0,o0=fit(0,end)
 best=max(((score(P,o,0,end),P,o%P) for P in np.arange(P0-0.0012,P0+0.0012,0.00002) for o in np.arange(o0-0.02,o0+0.02,0.001)))
 _,P,o=best
+# FIX: the offset above can be trapped half a beat off; re-search ALL offsets with the final fine period
+_,o=fit_off(P,0,end,0.002); _,o=max(((score(P,oo,0,end),oo%P) for oo in np.arange(o-0.004,o+0.004,0.0005)))
 # 2) per-segment phase with the SAME global period, plus each segment's independent period for reference
 def pd(a,b,P): d=abs(a-b)%P; return min(d,P-d)
 segs=[]; print('segment fits (phase measured against global P):')
 for a in np.arange(0,max(end-15,1),30):
     b=min(a+30,end); sc,oo=fit_off(P,a,b); _,Pi,_=fit(a,b)
     segs.append(dict(a=float(a),P=float(Pi),off=float(oo))); print('%.0f-%.0f  off=%.3f (global %.3f, diff %+.0f ms)  own-period BPM=%.2f'%(a,b,oo,o,1000*((oo-o+P/2)%P-P/2),60/Pi))
+# FIX: global phase = circular mean of the segment phases, so wrap-around/half-beat picks cannot cause false failures
+ang=np.array([2*np.pi*x['off']/P for x in segs]); o=float((np.angle(np.exp(1j*ang).mean())/(2*np.pi)*P)%P)
+for x in segs: print('  seg %.0f s: diff to final phase %+.0f ms'%(x['a'],1000*((x['off']-o+P/2)%P-P/2)))
 Ps=[x['P'] for x in segs]; phase_ok=all(pd(x['off'],o,P)<0.04 for x in segs); period_ok=bool(max(Ps)-min(Ps)<0.003); const=bool(period_ok and phase_ok)
 print(f'GLOBAL P={P:.5f} BPM={60/P:.3f} OFF={o:.3f} | period agrees: {period_ok} | phase agrees (<40ms): {phase_ok}',('| CONSTANT GRID OK' if const else '| NOT CONSTANT/PHASE UNSTABLE: do not lock a grid on this fit'))
 print('NOTE: check half/double-tempo against the reference edit pacing before locking the grid.')
