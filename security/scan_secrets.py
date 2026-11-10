@@ -17,7 +17,7 @@ PATTERNS=[  # (type, regex, secret name to create, group index of the value)
  ('webhook_url',r'https://(?:hooks\.slack\.com/services|discord(?:app)?\.com/api/webhooks|hook\.[a-z0-9.-]*make\.com)/[A-Za-z0-9/_\-]{16,}','MAKE_WEBHOOK_URL',0),
  ('chat_id',r'(?i)chat_?id["\']?\s*[:=]\s*["\']?(-?\d{6,})','CHAT_ID',1),
  ('generic_secret',r'''(?i)\b([A-Za-z_]*(?:password|passwd|secret|token|api_?key)[A-Za-z_]*)\s*[:=]\s*["']([A-Za-z0-9/+_\-=.]{16,})["']''','',2),
- ('drive_id',r'''["'](1[A-Za-z0-9_\-]{32})["']''','DRIVE_FILES_JSON',1),
+ ('drive_id',r'''["'](1[A-Za-z0-9_\-]{32})["']''','BUILTIN_FILES_JSON',1),
  ('email',r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}','MAIL_TO',0),
 ]
 SKIP_DIRS={'.git','__pycache__','node_modules'}
@@ -25,6 +25,13 @@ def allow():
     p=os.path.join(ROOT,'security','allowlist.txt'); pats=[]
     if os.path.exists(p): pats=[l.strip() for l in open(p) if l.strip() and not l.startswith('#')]
     return pats
+def acked():
+    p=os.path.join(ROOT,'security','history_acknowledged.txt'); out=set()
+    if os.path.exists(p):
+        for l in open(p):
+            l=l.split('#')[0].strip()
+            if l: out.add(l)
+    return out
 def mask(v): v=v.strip('"\''); return (v[:3]+'***'+f' ({len(v)} chars)') if len(v)>6 else '***'
 def scan_text(text,path,commit=None):
     out=[]
@@ -61,12 +68,12 @@ def scan_tree():
         res+=scan_text(raw.decode('utf-8','replace'),f)
     return res
 def scan_history():
-    r=subprocess.run(['git','log','--all','-p','--no-color','-U0','--format=@@COMMIT %h'],capture_output=True,text=True,cwd=ROOT,errors='replace'); res=[]; commit=''; path=''; al=allow()
+    r=subprocess.run(['git','log','--all','-p','--no-color','-U0','--format=@@COMMIT %h'],capture_output=True,text=True,cwd=ROOT,errors='replace'); res=[]; commit=''; path=''; al=allow(); ak=acked()
     for line in r.stdout.splitlines():
-        if line.startswith('@@COMMIT '): commit=line[9:]
+        if line.startswith('@@COMMIT '): commit=line[9:].strip()
         elif line.startswith('+++ b/'): path=line[6:]
         elif line.startswith('+') and not line.startswith('+++'):
-            if path.startswith('tests/') or any(fnmatch.fnmatch(path,p) for p in al): continue
+            if commit in ak or path.startswith('tests/') or any(fnmatch.fnmatch(path,p) for p in al): continue
             for f in scan_text(line[1:],path,commit): f['line']=0; res.append(f)
     seen=set(); out=[]
     for f in res:

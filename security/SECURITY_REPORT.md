@@ -30,3 +30,6 @@ DONE opens security-remediate.yml (owner only, default branch only). It replaces
 - Auto-fix handles plain string literals in .py/.yml/.md/.txt; other cases are reported for hand editing.
 - Settings that code cannot change are listed in the setup steps (fork approvals, branch rules, secret scanning, 2FA).
 - Dependencies: pip-audit found no known vulnerabilities in requirements.txt (checked today; not pinned to exact versions).
+
+## History acknowledgements
+security/history_acknowledged.txt lists old commits already reviewed. The guard stops warning about them. Drive ids and the owner e-mail in those commits are neutralised by: unsharing/re-uploading the Drive files (new ids) and keeping the live values only in the BUILTIN_FILES_JSON and MAIL_TO secrets.

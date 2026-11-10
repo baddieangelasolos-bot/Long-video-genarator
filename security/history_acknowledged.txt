@@ -1,0 +1,10 @@
+# Old commits whose findings the owner has reviewed (Drive file ids / e-mail only; no API keys or tokens).
+# One short commit hash per line. Add a hash ONLY after the exposed item has been rotated or made harmless
+# (Drive sharing set to private / files re-uploaded with new ids, Gmail app password revoked and recreated).
+298d88f
+dc51eb5
+bcf04c9
+1e849f9
+e637ad5
+81f898a
+f52103a
