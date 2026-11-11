@@ -10,7 +10,7 @@ PREF={'close':12,'medium':8,'wide':9,'face':8}
 def _json(path,default):
     try: return json.load(open(path))
     except Exception: return default
-STYLE=_json(PIPE+'/style.json',{}); CFG=_json(PIPE+'/config.json',{}); FPS=int(CFG.get('fps',30)); MINB=7; PBEAT=0; LAST_WIDE=[]; MAXSPLIT=int(os.environ.get('MAX_SPLIT','5')); SLOW=STYLE.get('slow','some'); WIDE_CAP=float(STYLE.get('wide_share_max',0.25))
+STYLE=_json(PIPE+'/style.json',{}); CFG=_json(PIPE+'/config.json',{}); FPS=int(CFG.get('fps',30)); MINB=7; PBEAT=0; LAST_WIDE=[]; RELAX=False; MAXSPLIT=int(os.environ.get('MAX_SPLIT','5')); SLOW=STYLE.get('slow','some'); WIDE_CAP=float(STYLE.get('wide_share_max',0.25))
 def setup_style(P):
     """Beats per clip from the style: min clip length (3.0 s default, shorter if the reference cuts faster) and preferred length scaled to the reference's median shot."""
     global MINB,PBEAT
@@ -144,10 +144,13 @@ def select(C,P,final_len,notes):
     body_b=total-sum(r[5] for r,c in intro)-sum(r[5] for r,c in fin)    # missing intro/finale footage is filled by the body instead of leaving a hole
     # body
     pools={g:[c for c in C if c['group']==g] for g in ('close','medium','wide','face')}
-    cap={'wide':WIDE_CAP,'face':0.2}; beats={g:0 for g in pools}; seq=['close','close','wide','medium','close','face','close','wide','medium','close','face']; i=0; body=[]; bsum=0; guard=0; prev=None
+    from collections import defaultdict
+    if RELAX:      # last resort before shortening: leftover pre-match/celebration clips and more face shots fill the body (wide cap stays protected)
+        pools['extra']=[c for c in C if c['group'] in ('celebration','intro') and c['id'] not in used]; PREF['extra']=PREF['medium']
+    cap={'wide':WIDE_CAP,'face':0.35 if RELAX else 0.2}; beats=defaultdict(int); seq=['close','close','wide','medium','close','face','close','wide','medium','close','face']; i=0; body=[]; bsum=0; guard=0; prev=None
     while bsum<body_b and guard<400:
         guard+=1; g=seq[i%len(seq)]; i+=1; picked=None
-        for gg in [g]+[x for x in ('close','medium','wide','face') if x!=g]:
+        for gg in [g]+[x for x in ('close','medium','wide','face')+(('extra',) if RELAX else ()) if x!=g]:
             if gg in cap and beats[gg]+PREF[gg]>cap[gg]*body_b: continue
             c,f=take(pools[gg],used,prev,PREF[gg],P)
             if c: picked=(gg,c,f); break
@@ -164,9 +167,15 @@ def select(C,P,final_len,notes):
     return [r for r,c in intro+body+fin], dict(total=total,intro=intro_b,body=body_b,finale=fin_b,wide_share=round(wide/max(bsum,1),3),face_share=round(face/max(bsum,1),3))
 def plan_loop(C,P,final_len):
     """Shorten the video in steps until it fits. Last resort: drop surplus wide clips from the body so the protected wide cap holds and the run still finishes."""
+    global RELAX
     while True:
-        tn=[]; clips,stats=select(C,P,final_len,tn)
+        RELAX=False; tn=[]; clips,stats=select(C,P,final_len,tn)
         bad=any(n.startswith('BODY SHORTFALL') for n in tn) or stats['wide_share']>WIDE_CAP+1e-9
+        if bad:
+            RELAX=True; tn2=[]; clips2,stats2=select(C,P,final_len,tn2)
+            if not (any(n.startswith('BODY SHORTFALL') for n in tn2) or stats2['wide_share']>WIDE_CAP+1e-9):
+                clips,stats=clips2,stats2; tn=tn2+['RELAXED: body footage was short, so leftover pre-match/celebration clips and up to 35% face shots were used to keep the full music length (wide cap 25% unchanged). Review the result.']; bad=False
+            else: RELAX=False
         if not bad or final_len<=12: break
         final_len=max(12.0,round(final_len-max(2.0,final_len*0.1),1))
     if stats['wide_share']>WIDE_CAP+1e-9:

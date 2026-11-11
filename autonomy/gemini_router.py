@@ -50,7 +50,7 @@ def _call(model,prompt,images,json_mode,timeout,extra_parts=()):
         _cool[model]=time.time()+min(max(ra,20),900); raise _Skip(f'{model}: quota/rate limit (429)')
     if r.status_code in (400,404): _cool[model]=time.time()+3600; raise _Skip(f'{model}: HTTP {r.status_code}')
     if r.status_code in (401,403): _cool[model]=time.time()+3600; raise _Skip(f'{model}: auth/permission {r.status_code}')
-    if r.status_code>=500: _cool[model]=time.time()+60; raise _Skip(f'{model}: server error {r.status_code}')
+    if r.status_code>=500: _cool[model]=time.time()+300; raise _Skip(f'{model}: server error {r.status_code}')
     j=r.json(); txt=j['candidates'][0]['content']['parts'][0]['text']
     if json_mode:
         t=txt.strip(); t=re.sub(r'^```(?:json)?|```$','',t,flags=re.M).strip(); json.loads(t); txt=t
@@ -61,11 +61,13 @@ def ask(role,prompt,images=(),json_mode=False,timeout=120,extra_parts=()):
     for i,m in enumerate(tiers):
         if _cool.get(m,0)>time.time(): continue
         try:
-            txt=_call(m,prompt,images,json_mode,timeout,extra_parts)
+            txt=_call(m,prompt,images,json_mode,min(timeout,75) if i<len(tiers)-1 else timeout,extra_parts)
             if i>0: ev(f'FALLBACK: primary {tiers[0]} unavailable, answered by tier {i+1} ({m})')
             return txt,m
         except _Skip as e: ev(str(e)+' -> next tier')
-        except Exception as e: ev(f'{m}: {type(e).__name__} {str(e)[:80]} -> next tier')
+        except Exception as e:
+            if 'Timeout' in type(e).__name__ or 'Connection' in type(e).__name__: _cool[m]=time.time()+900      # circuit breaker: an overloaded model is skipped for 15 min instead of costing 2 min per request
+            ev(f'{m}: {type(e).__name__} {str(e)[:80]} -> next tier')
     ev('ALL Gemini tiers failed for this request'); return None,None
 # ---------- whole-video understanding (Gemini Files API) ----------
 UPLOAD_BASE=os.environ.get('GEMINI_UPLOAD_BASE','https://generativelanguage.googleapis.com/upload/v1beta')
