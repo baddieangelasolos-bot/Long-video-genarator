@@ -12,7 +12,7 @@ ENV_WHITELIST={'RELAY_RETRY_SLEEP','JOBS','AI_THROTTLE','USE_AI','MECH_EXTRA_WAI
 PIP_ALLOW={'numpy','scipy','opencv-python-headless','pillow','requests','gdown','pyyaml'}; PIP_MAP={'cv2':'opencv-python-headless','PIL':'pillow','yaml':'pyyaml'}
 APT_ALLOW={'ffmpeg','fonts-dejavu-core'}
 PROTECTED_WORDS=('final_len','min_clip','1920','1080','fps','wide_share','letterbox','goals','end_at')
-SIGNATURES=[(r'Too many users have viewed|Cannot retrieve the public link|quota exceeded|Access denied|Permission denied.*drive','drive_wait'),
+SIGNATURES=[(r'DRIVE_PERMISSION_DENIED','drive_perm'),(r'Too many users have viewed|Cannot retrieve the public link|quota exceeded|Access denied|Permission denied.*drive','drive_wait'),
  (r"ModuleNotFoundError: No module named '([^']+)'",'pip'),(r'No space left on device','disk'),
  (r'ffmpeg: command not found|ffprobe: command not found|ffmpeg: not found','apt_ffmpeg'),
  (r'EDL INVALID','edl'),(r'FAIL \w+ \(all attempts\)|FAILS=[1-9]','render_retry'),
@@ -175,6 +175,8 @@ class Mechanic:
             except StageFail as e:
                 s.last_tail=e.tail; fid,arg=s.classify(e.tail+str(e))
                 s.log(f'stage {name} attempt {attempt} failed: {e}')
+                if fid=='drive_perm':
+                    rec['seconds']=round(time.time()-t); s.unsolved.append(f'{name}: DRIVE_PERMISSION_DENIED: the runner cannot download your Drive files (no public link). Run shareResourceFolders in Apps Script (or set the resource folders to Anyone with the link: Viewer), then run the workflow again. No retries were made.'); raise Halt(f'stage {name}: Drive sharing problem (stopped immediately, no retries)')
                 if attempt>retries: break
                 fixed=None
                 if fid:

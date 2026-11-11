@@ -53,7 +53,7 @@ def main():
         if re.fullmatch(r's\d\d\.mp4|gal\.mp4|dor\.mp4|rma\.mp4|music\.m4a|ref\.mp4|full_.*\.npy',f) and f not in keep and not f.startswith('full_'):
             try: os.remove(os.path.join(DEST,f))
             except OSError: pass
-    man={'files':{}}; bad=[]; total=sum(int(s) for _,_,s in files); log(f'{len(files)} file(s), {total/1e6:.0f} MB to download')
+    man={'files':{}}; bad=[]; linkfail=0; done=0; total=sum(int(s) for _,_,s in files); log(f'{len(files)} file(s), {total/1e6:.0f} MB to download')
     for name,fid,size in files:
         size=int(size)
         if not re.fullmatch(r'[A-Za-z0-9._-]{1,80}',name) or size<=0: print('bad entry',name); return 1
@@ -61,11 +61,19 @@ def main():
         for a in range(1,6):
             if ok: break
             if os.path.exists(dst): os.remove(dst)
+            perm=False
             try: gdown.download(id=fid,output=dst,quiet=True,resume=False)
-            except Exception as e: log(name,'attempt',a,type(e).__name__,str(e)[:160])
+            except Exception as e:
+                log(name,'attempt',a,type(e).__name__,str(e)[:160]); perm=type(e).__name__=='FileURLRetrievalError'
+            if perm and a>=2: break      # no public link for this file: retrying cannot help (real quota errors look different)
             got=os.path.getsize(dst) if os.path.exists(dst) else 0
             if got==size: ok=True; break
             log(name,'size',got,'expected',size,'attempt',a,'(Drive quota or permission page? Run shareResourceFolders once in Apps Script so the folders are viewable by link)'); time.sleep(SLEEP*a)
+        if not ok and perm:
+            linkfail+=1
+            if linkfail>=2 and done==0:      # two different files without a public link and nothing downloaded: sharing problem, stop in seconds
+                print('DRIVE_PERMISSION_DENIED: Google gives the runner no public link for your files (not a quota problem). Run shareResourceFolders once in Apps Script (or set the three resource folders to Anyone with the link: Viewer), then run again. Stopped after seconds instead of retrying for hours.'); return 4
+        if ok: done+=1
         if ok: man['files'][name]={'size':size,'sha256':sha(dst),'original':names.get(name.rsplit('.',1)[0],name)}; log('OK',name,size,'<-',names.get(name.rsplit('.',1)[0],name))
         else: bad.append(name)
     json.dump(man,open(DEST+'/manifest.json','w'),indent=1); json.dump(names,open(DEST+'/names.json','w'),indent=1)
