@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
 """
-script_planner.py - turns source clips + music + the master template into a verified timeline.json.
-
-Flow
-  1. Load config/master_rendering_template.json (the permanent rulebook + schema).
-  2. Probe the raw clips and the music (target length = audible end rounded DOWN to 0.5 s).
-  3. Ask Gemini (modern `google-genai` SDK) for a JSON edit decision list, walking the
-     10-model free-tier fallback chain. Output is forced to JSON with response_mime_type.
-  4. Every answer is repaired + validated by timeline_core (the sandbox). Gemini can never
-     put an invented file or an impossible window on the timeline.
-  5. If every model fails, a deterministic offline planner builds the timeline, so a run never
-     stops just because the free tier is busy.
-
+script_planner.py - source clips + music + master template -> a verified timeline.json.
+Gemini (google-genai, 10-model chain, JSON-only output) proposes; timeline_core repairs and validates every answer;
+if every model fails a deterministic offline planner builds the timeline.
 Exit codes: 0 ok | 2 setup/usage error | 3 NEEDS MORE SOURCE VIDEO | 4 no valid plan could be made
 """
 from __future__ import annotations
@@ -31,19 +22,18 @@ import timeline_core as core  # noqa: E402
 
 log = logging.getLogger("planner")
 
-# Ordered free-tier chain, exactly as specified by the owner. Names that the API does not
-# know for this key are skipped in milliseconds (see discover_models + classify_error).
+# Owner's ordered chain; names the API does not serve for this key are skipped (discover_models).
 MODEL_FALLBACK_CHAIN = [
-    "gemini-3.8-flash",         # primary
-    "gemini-3.6-flash",         # backup 1
-    "gemini-3.5-flash-lite",    # backup 2
-    "gemini-3.1-flash-lite",    # backup 3
-    "gemini-3-flash-preview",   # backup 4
-    "gemini-1.5-flash",         # backup 5
-    "gemini-1.5-pro",           # backup 6
-    "gemini-2.5-flash-lite",    # backup 7
-    "gemini-2.5-flash-preview", # backup 8
-    "gemini-2.0-flash-lite",    # backup 9
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash-preview",
+    "gemini-2.0-flash-lite",
 ]
 REQUEST_TIMEOUT_S = 75     # per request; a hanging model must not eat the whole run
 MAX_CATALOG_LINES = 320    # keeps the prompt small enough for lite models
@@ -119,8 +109,7 @@ def build_prompt(ctx: dict, errors: list[str] | None = None, previous: str | Non
                      "spread clips across all sources and across each source's length.")
     lines += [
         "RULEBOOK: " + json.dumps(tpl["planning_rulebook"], separators=(",", ":")),
-        "LIMITS: " + json.dumps({"sections": {k: {kk: vv for kk, vv in v.items() if kk != "allowed_types"}
-                                              for k, v in cons["sections"].items()},
+        "LIMITS (allowed_types = the ONLY shot_type values allowed in that section): " + json.dumps({"sections": cons["sections"],
                                  "wide_share_max_of_main": cons["wide_share_max_of_main"],
                                  "speed": cons["speed"], "transitions": cons["transitions"]}),
         "PACING (measured clip lengths, seconds, from the reference edit): " + json.dumps(
@@ -474,6 +463,14 @@ def local_plan(ctx: dict, seed: int = 7) -> dict | None:
             s = foot.take(close_pool, want, main_cfg["min_clip_s"], main_cfg["max_clip_s"], avoid, "main")
         if s is None:                               # last resort: any other allowed type
             s = foot.take(filler("main"), want, main_cfg["min_clip_s"], main_cfg["max_clip_s"], avoid, "main")
+        if s is None:                               # then the capped-but-legal types, never beyond the template caps
+            gc = tpl["constraints"]
+            for typ, capn in (("near_miss_shot", 99), ("goal", gc["goal_clips_max"] * 4),
+                              ("penalty_goal", gc["penalty_goal_clips_max"] * 4), ("face", gc["face_clips_max"])):
+                if sum(1 for x in shots if x["shot_type"] == typ) < capn:
+                    s = foot.take([typ], min(want, 3.5), main_cfg["min_clip_s"], 4.5, avoid, "main")
+                    if s:
+                        break
         return add_main(s)
 
     fill("main", budgets["main"] - (state["main_t"]), pick_main)
@@ -507,6 +504,24 @@ def local_plan(ctx: dict, seed: int = 7) -> dict | None:
         return None
     plan["_notes"] = notes + warns + (["content-blind safe mode: no shot labels were available"] if blind else [])
     return plan
+
+
+def local_plan_robust(ctx: dict, seed: int = 7, tries: int = 8) -> dict | None:
+    """The offline planner is seed-dependent; try a few seeds (deterministic order) before giving up."""
+    last: NeedsMoreSource | None = None
+    for k in range(tries):
+        try:
+            plan = local_plan(ctx, seed + k)
+        except NeedsMoreSource as exc:
+            last = exc
+            continue
+        if plan:
+            if k:
+                log.info("Offline planner: seed %d did not satisfy the rules, seed %d did", seed, seed + k)
+            return plan
+    if last:
+        raise last
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -580,7 +595,7 @@ def main(argv: list[str] | None = None, client_factory: Callable[[], Any] = make
             return 4
         log.warning("Using the offline safe-mode planner")
         try:
-            plan = local_plan(ctx, args.seed)
+            plan = local_plan_robust(ctx, args.seed)
         except NeedsMoreSource as exc:
             log.error("NEEDS MORE SOURCE VIDEO: %s. Add more close-up / skill footage and run again.", exc)
             return 3
