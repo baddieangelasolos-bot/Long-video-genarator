@@ -448,27 +448,60 @@ def repair(plan: dict, ctx: dict) -> tuple[dict, list[str]]:
             need = s["duration"] * s["speed_multiplier"]
         s["trim_start"] = round(min(max(0.0, s["trim_start"]), max(0.0, room - need)), 3)
 
-    _trim_overlaps(shots, notes)
+    import plan_repair as pr               # catalog truth, disallowed types, wide cap (kept in its own module)
+    pr.apply_catalog(shots, ctx, notes)
+    pr.drop_disallowed(shots, cons, notes)
+    pr.reclamp(shots, cons)
+    _trim_overlaps(shots, notes, cons)
+    pr.reclamp(shots, cons)
     _fit_to_budget(shots, sources, target, tpl, ctx.get("catalog"), notes)
+    for _ in range(2):                     # wide share must end <= cap: shrink/drop wide clips, then refill with the rest
+        if not pr.shed_wide(shots, target, tpl, notes):
+            break
+        _fit_to_budget(shots, sources, target, tpl, ctx.get("catalog"), notes)
     for i, s in enumerate(shots):
         s["shot_id"] = f"S{i + 1:03d}"
     return {"timeline": shots}, notes
 
 
-def _trim_overlaps(shots: list[dict], notes: list[str]) -> None:
-    """If a window runs into the next window of the same source, shorten it (never below the section minimum)."""
-    by_src: dict[str, list[dict]] = {}
-    for s in shots:
-        by_src.setdefault(s["source_video_file"], []).append(s)
-    for wins in by_src.values():
-        wins.sort(key=lambda w: w["trim_start"])
-        for a, b in zip(wins, wins[1:]):
+def _clip_limits(shots: list[dict], i: int, cons: dict) -> tuple[float, float]:
+    cfg = cons["sections"][shots[i]["section"]]
+    first_main = next((k for k, s in enumerate(shots) if s["section"] == "main"), None)
+    if i == first_main and shots[i]["shot_type"] == "wide":
+        return cfg["opener_wide_min_s"], cfg["opener_wide_max_s"]
+    return cfg["min_clip_s"], cfg["max_clip_s"]
+
+
+def _wide_limit(target: float, tpl: dict) -> float:
+    return (tpl["constraints"]["wide_share_max_of_main"] - 0.005) * section_budgets(target, tpl)["main"]
+
+
+def _trim_overlaps(shots: list[dict], notes: list[str], cons: dict | None = None) -> None:
+    """If a window runs into the next window of the same source, shorten it; if that would break the clip minimum,
+    drop the later of the two shots instead (the fit step then refills the section)."""
+    drop: set[int] = set()
+    by_src: dict[str, list[int]] = {}
+    for i, s in enumerate(shots):
+        by_src.setdefault(s["source_video_file"], []).append(i)
+    for idxs in by_src.values():
+        idxs.sort(key=lambda k: shots[k]["trim_start"])
+        for ia, ib in zip(idxs, idxs[1:]):
+            a, b = shots[ia], shots[ib]
+            if ia in drop or ib in drop:
+                continue
             end = a["trim_start"] + a["duration"] * a["speed_multiplier"]
             if end > b["trim_start"] - 0.02:
                 new = round((b["trim_start"] - 0.02 - a["trim_start"]) / a["speed_multiplier"], 3)
-                if new >= 0.6:
+                lo = _clip_limits(shots, ia, cons)[0] if cons else 0.6
+                if new >= max(0.6, lo):
                     notes.append(f"repair: shortened {a['shot_id']} by {a['duration'] - new:.2f}s to stop reusing footage")
                     a["duration"] = new
+                else:
+                    gone = max(ia, ib)
+                    drop.add(gone)
+                    notes.append(f"repair: dropped {shots[gone]['shot_id']} (it reused footage of another shot)")
+    if drop:
+        shots[:] = [s for i, s in enumerate(shots) if i not in drop]
 
 
 def _room_after(s: dict, sources: dict, cat_idx: dict[str, list[dict]], shots: list[dict]) -> float:
@@ -514,6 +547,13 @@ def _fit_to_budget(shots: list[dict], sources: dict, target: float, tpl: dict,
                     caps.append(max(0.0, min(hi - s["duration"], _room_after(s, sources, cat_idx, shots))))
                 else:
                     caps.append(max(0.0, s["duration"] - lo))
+            if sec == "main" and delta > 0:     # wide clips may only grow while the wide share stays under the cap
+                wk = [k for k, i in enumerate(idxs) if shots[i]["shot_type"] == "wide"]
+                room = max(0.0, _wide_limit(target, tpl) - sum(shots[idxs[k]]["duration"] for k in wk))
+                wsum = sum(caps[k] for k in wk)
+                if wsum > room and wsum > 0:
+                    for k in wk:
+                        caps[k] *= room / wsum
             tot = sum(caps)
             if tot < 1e-6:
                 break
@@ -523,6 +563,21 @@ def _fit_to_budget(shots: list[dict], sources: dict, target: float, tpl: dict,
         got = sum(shots[i]["duration"] for i in idxs)
         if abs(got - budgets[sec]) > 0.05:
             notes.append(f"repair: {sec} ends {got - budgets[sec]:+.2f}s from budget (limits reached)")
+    # sections may fall short of their budgets (limits reached): let any clip with room grow so the total is exact
+    resid = round(target - sum(s["duration"] for s in shots), 3)
+    for _ in range(3):
+        if resid <= 0.004:
+            break
+        caps = [0.0 if (s["section"] == "main" and s["shot_type"] == "wide") else
+                max(0.0, min(_clip_limits(shots, i, cons)[1] - s["duration"], _room_after(s, sources, cat_idx, shots)))
+                for i, s in enumerate(shots)]
+        tot = sum(caps)
+        if tot < 1e-6:
+            break
+        take = min(resid, tot)
+        for s, c in zip(shots, caps):
+            s["duration"] = round(s["duration"] + take * c / tot, 3)
+        resid = round(target - sum(s["duration"] for s in shots), 3)
     # absorb rounding dust (< 1 frame-ish) on the last main shot so the total is exact
     total = sum(s["duration"] for s in shots)
     resid = round(target - total, 3)
