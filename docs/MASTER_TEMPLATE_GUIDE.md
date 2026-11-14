@@ -13,9 +13,9 @@
 ```bash
 pip install -r requirements.txt            # plus: apt install ffmpeg
 export GEMINI_API_KEY=...                   # never commit it
-python scripts/script_planner.py --sources-dir work/src --music work/music.m4a \\
+python scripts/script_planner.py --sources-dir work/src --music work/music.m4a \
        [--catalog work/shot_catalog.json] --out work/timeline.json
-python scripts/render_video.py  --sources-dir work/src --music work/music.m4a \\
+python scripts/render_video.py  --sources-dir work/src --music work/music.m4a \
        --timeline work/timeline.json --out work/final.mp4 [--beat-snap] [--no-letterbox]
 python -m unittest discover -s tests -v     # 39 tests, Gemini mocked
 ```
@@ -33,6 +33,9 @@ prepare > fetch > inventory > identify > scan > plan > master_plan > master_rend
 - The old `_guard` min-clip / wide-share checks are replaced by the template validator (the owner template allows a 0.6 s opener).
 - `ref.mp4` is never used as footage. Encoder overrides are `LVG_RENDER_PRESET` / `LVG_RENDER_CRF` only (tests); the workflow's `RENDER_PRESET` is ignored here.
 - Not in the new renderer: logo masking and per-source colour grading. No text is ever drawn.
+
+- If Gemini labelled fewer than 90% of the shots and the labelled plan cannot be built, the run continues with a content-blind plan and the mail says so, instead of falsely asking for more footage.
+- The render step logs `clip n/N done` lines, so the Actions log never looks frozen.
 
 ## Shot catalog
 Without labels the planner is **content-blind**: structure and pacing follow the template but scene choice is random.

@@ -6,6 +6,8 @@ import mechanic as M
 try: import gemini_router as G
 except Exception: G=None
 HERE,WORK,PIPE,BUILD=M.HERE,M.WORK,M.PIPE,M.BUILD; SRC=os.environ.get('SRC_DIR',WORK+'/src')
+ROOT=os.path.dirname(HERE); TPL=ROOT+'/config/master_rendering_template.json'
+MASTER=os.environ.get('MASTER_RENDER','1')!='0' and os.path.exists(TPL)   # master-template path (planner+renderer); MASTER_RENDER=0 restores the old path
 def ff(path,entries='format=duration:stream=r_frame_rate,width,height'):
     r=subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries',entries,'-of','json',path],capture_output=True,text=True); return json.loads(r.stdout)
 def _guard(self,where=''):
@@ -15,6 +17,7 @@ def _guard(self,where=''):
     def j(p,d):
         try: return json.load(open(p))
         except Exception: return d
+    if MASTER: return      # master path: clip length and wide share are enforced by scripts/timeline_core.validate (owner template), output by verify_output
     p=PIPE+'/edl.json'
     if os.path.exists(p):
         e=json.load(open(p)); fps=int(j(PIPE+'/config.json',{}).get('fps',30)); st=j(PIPE+'/style.json',{}); minf=int(round(float(st.get('min_clip_s',3.0))*fps)); frames=sum(c['frames'] for c in e)
@@ -84,6 +87,7 @@ def main():
         elif S.get('style',{}).get('source')=='reference' and not (S['style'].get('gemini')):
             S.setdefault('sug',[]).append('Gemini could not watch the reference this run, so effects were measured only (cuts, flashes, colour). Re-run when Gemini is available.')
     def beat():
+        if MASTER: m.log('master template: beat lock is optional, skipped (target length = audible end of the music, rounded down to 0.5 s)'); return
         res=[]
         def one(lo,hi):
             out=py(PIPE+'/beatgrid.py',SRC+'/music.m4a',lo,hi,cwd=PIPE,timeout=900); b=json.load(open(PIPE+'/beat.json')); b['bpm']=60/b['P']; res.append((b,out)); return out
@@ -109,7 +113,58 @@ def main():
             out=p.communicate()[0]; m.logf.write(out[-2000:]+'\n')
             if p.returncode!=0 or not os.path.exists(f'{SRC}/full_{s}.npy'): bad.append((s,out[-400:]))
         if bad: raise M.StageFail('cut scan failed for '+', '.join(s for s,_ in bad),'\n'.join(t for _,t in bad))
+    def plan_master():
+        info=json.load(open(WORK+'/analysis/src_info.json')); env={'ROWS_ONLY':'1'}
+        for s in S['srcs']: py(PIPE+'/shots.py',s,info[s]['fps'],info[s]['dur'],2.6,cwd=PIPE,env=env)
+        py(PIPE+'/shots2.py',*S['srcs'],cwd=PIPE,timeout=3000)
+        try: out=py(ROOT+'/scripts/classify_shots.py','--template',TPL,'--shots-dir',WORK+'/shots','--out',WORK+'/analysis/shot_catalog.json','--sources',*S['srcs'],cwd=ROOT,timeout=3000)
+        except M.StageFail as e: m.notices.append('shot labelling failed, planner runs without labels (scene choice is content-blind): '+str(e)[:120]); return
+        mm=re.search(r'CATALOG (\{.*\})',out)
+        if mm:
+            st=json.loads(mm.group(1)); S['cat_stats']=st; m.log('shot catalog: '+mm.group(1))
+            if not st.get('segments'): m.notices.append('Gemini labelled no shots: planner runs without labels (scene choice is content-blind)')
+    def master_plan():
+        cat=WORK+'/analysis/shot_catalog.json'; tl=BUILD+'/timeline.json'; os.makedirs(BUILD,exist_ok=True)
+        try: has_cat=bool(os.path.exists(cat) and json.load(open(cat)))
+        except Exception: has_cat=False
+        def run_planner(use_cat):
+            args=[sys.executable,ROOT+'/scripts/script_planner.py','--template',TPL,'--sources-dir',SRC,'--music',SRC+'/music.m4a','--out',tl]
+            if use_cat: args+=['--catalog',cat]
+            m.run_cmd(args,cwd=ROOT,timeout=1800)
+        def more_source(e): return M.Halt('NEEDS MORE SOURCE VIDEO. '+e.tail[-900:]+' WHAT TO DO: upload more clips to the source video folder in Drive, then run the workflow again.')
+        if not has_cat: m.notices.append('no shot labels: planner is content-blind (structure and pacing follow the template, scene choice does not)')
+        try: run_planner(has_cat)
+        except M.StageFail as e:
+            if e.rc not in (3,4): raise
+            st=S.get('cat_stats') or {}
+            if has_cat and st.get('rows') and st.get('labelled',0)<0.9*st['rows']:      # Gemini was busy: do not blame the footage
+                m.notices.append(f"Gemini labelled only {st.get('labelled',0)} of {st['rows']} shots (busy or quota): this plan is content-blind. Run again later for a labelled plan.")
+                try: run_planner(False)
+                except M.StageFail as e2:
+                    if e2.rc==3: raise more_source(e2)
+                    raise
+            elif e.rc==3: raise more_source(e)
+            else: raise
+        pl=json.load(open(tl)); S['final_len']=float(pl['target_duration_s']); S['planner']=(pl.get('_planner') or {}).get('planner','?'); S['known']=False
+        m.log(f"master plan: {len(pl['timeline'])} shots, {S['final_len']} s, planner={S['planner']}")
+    def outname():
+        base=re.sub(r'[^A-Za-z0-9_]+','_',S['player'].title()).strip('_') or 'Video'; return f"{BUILD}/{base}.mp4" if base=='Highlights' else f"{BUILD}/{base}_Highlights.mp4"
+    def stream(cmd,cwd,timeout):
+        p=subprocess.Popen(cmd,cwd=cwd,env=dict(m.env),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,errors='replace'); tail=[]; t0=time.time()
+        for line in p.stdout:
+            line=m.redact(line.rstrip()); tail=(tail+[line])[-120:]
+            if re.search(r'clip \d+/\d+ done|Rendering|ERROR|WARNING|DONE',line): m.log(line[:300])
+            if time.time()-t0>timeout: p.kill(); raise M.StageFail('render timed out','\n'.join(tail),124)
+        rc=p.wait()
+        if rc!=0: raise M.StageFail(f'render_video.py exited {rc}','\n'.join(tail),rc)
+    def master_render():
+        spec=json.load(open(TPL))['render_spec']; fps=int(spec['fps'])
+        cfg=json.load(open(PIPE+'/config.json')); cfg['fps']=fps; json.dump(cfg,open(PIPE+'/config.json','w'),indent=1)      # verify_output and qa compare against config fps
+        S['out']=outname()
+        stream([sys.executable,ROOT+'/scripts/render_video.py','--template',TPL,'--timeline',BUILD+'/timeline.json','--sources-dir',SRC,'--music',SRC+'/music.m4a','--out',S['out'],'--no-beats','--edl-out',PIPE+'/edl.json'],ROOT,19000)
+        m.log('master render: '+open(S['out']+'.report.json').read().replace('\n',' ')[:400])
     def plan():
+        if MASTER: return plan_master()
         r=subprocess.run([sys.executable,HERE+'/apply_known_good.py'],capture_output=True,text=True,cwd=PIPE,env=dict(m.env,PIPE_DIR=PIPE)); m.log(r.stdout.strip()+(' | stderr: '+r.stderr.strip()[-300:] if r.returncode not in (0,3) or not r.stdout.strip() else ''))
         if r.returncode==0:
             S['known']=True; mm=re.search(r'player (.+?) club (.+)$',r.stdout.strip()); 
@@ -149,7 +204,7 @@ def main():
         if st['fails']: raise M.StageFail('render failed clips: '+str(st['fails']),out[-1500:])
         if st['degraded']: m.notices.append('render degraded clips (retry ladder used): '+str(st['degraded']))
     def assemble():
-        base=re.sub(r'[^A-Za-z0-9_]+','_',S['player'].title()).strip('_') or 'Video'; S['out']=f"{BUILD}/{base}.mp4" if base=='Highlights' else f"{BUILD}/{base}_Highlights.mp4"; py(PIPE+'/assemble.py',SRC+'/music.m4a',S['final_len'],S['out'],cwd=PIPE)
+        S['out']=outname(); py(PIPE+'/assemble.py',SRC+'/music.m4a',S['final_len'],S['out'],cwd=PIPE)
     def qa():
         out=py(PIPE+'/qa.py',S['out'],WORK+'/qa',cwd=PIPE,timeout=1800); line=[l for l in out.splitlines() if l.startswith('QA RESULT')]
         hard=[w for w in ('frame count mismatch','not 1920x1080','no audio','audio start_time') if line and w in line[0]]
@@ -166,11 +221,14 @@ def main():
         except BaseException: open(ef,'w').write('export failed'); raise
         if os.path.exists(ef): os.remove(ef)
     try:
-        for name,fn,kw in (('prepare',prepare,{}),('fetch',fetch,{'retries':3}),('inventory',inventory,{}),('identify',identify,{'optional':True,'retries':0}),('style',style,{'optional':True,'retries':1}),('style_ai',style_ai,{'optional':True,'retries':0}),('beat',beat,{'retries':1}),('scan',scan,{}),
+        old=(('prepare',prepare,{}),('fetch',fetch,{'retries':3}),('inventory',inventory,{}),('identify',identify,{'optional':True,'retries':0}),('style',style,{'optional':True,'retries':1}),('style_ai',style_ai,{'optional':True,'retries':0}),('beat',beat,{'retries':1}),('scan',scan,{}),
                            ('plan',plan,{}),('edl',edl,{'retries':4}),('watermark',watermark,{'optional':True,'retries':1}),('cards',cards,{}),('grade',grade,{'optional':True,'retries':1}),
-                           ('render',render,{'retries':3}),('assemble',assemble,{}),('qa',qa,{'retries':1}),('verify_output',verify_output,{'retries':0}),('export',export,{'optional':True,'retries':0})):
+                           ('render',render,{'retries':3}),('assemble',assemble,{}),('qa',qa,{'retries':1}),('verify_output',verify_output,{'retries':0}),('export',export,{'optional':True,'retries':0}))
+        master=(('prepare',prepare,{}),('fetch',fetch,{'retries':3}),('inventory',inventory,{}),('identify',identify,{'optional':True,'retries':0}),('scan',scan,{}),('plan',plan,{}),('master_plan',master_plan,{'retries':1}),('master_render',master_render,{'retries':1}),
+                           ('qa',qa,{'retries':1}),('verify_output',verify_output,{'retries':0}),('export',export,{'optional':True,'retries':0}))
+        for name,fn,kw in (master if MASTER else old):
             m.stage(name,fn,**kw)
-        sty=S.get('style') or {}; extra=f"Video: {S['out']}\nSources: {len(S['srcs'])} | title: {S['player']} / {S['club'] or '-'} ({S['identity']}) | style: {sty.get('source','?')} - {str(sty.get('describe',''))[:160]}\nPlayer: {S['player']} / {S['club']} | plan: {'known-good (reproduced)' if S['known'] else 'AI/heuristic planner'} | final length {S['final_len']} s"
+        sty=S.get('style') or {}; extra=f"Video: {S['out']}\nSources: {len(S['srcs'])} | title: {S['player']} / {S['club'] or '-'} ({S['identity']}) | style: {sty.get('source','?')} - {str(sty.get('describe',''))[:160]}\nPlayer: {S['player']} / {S['club']} | plan: {'known-good (reproduced)' if S['known'] else ('master template ('+S.get('planner','?')+')' if MASTER else 'AI/heuristic planner')} | final length {S['final_len']} s"
         status='SUCCESS' if not m.unsolved else 'SUCCESS WITH WARNINGS'; m.notify('success',f'[Video pipeline] {status}',m.summary_text(status,extra))
         sg=m.suggest(extra=S.get('sug',[]))
         try:
