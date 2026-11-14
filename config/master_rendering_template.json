@@ -1,0 +1,473 @@
+{
+  "schema_version": "1.0.0",
+  "_meta": {
+    "purpose": "Master JSON template + permanent rulebook for the Long Video Generator planner (Gemini fills it, Python validates it, FFmpeg renders it).",
+    "derived_from": {
+      "file": "1000021800.mp4",
+      "probe": {
+        "duration_s": 312.33,
+        "resolution": "1920x1080",
+        "fps": 30.0,
+        "audio": "AAC 44.1 kHz stereo, runs 0-163.28 s only"
+      },
+      "edit_proper_s": [
+        0.0,
+        187.5
+      ],
+      "note": "Everything after 187.5 s is a set of example clips for the owner's notes (letterboxed, other creators). They are excluded from every statistic below.",
+      "methods": [
+        "ffprobe",
+        "frame-level cut detection (colour histogram + tiny-gray diff, cross-checked by a second detector)",
+        "OCR of the owner's on-screen notes",
+        "librosa beat tracking",
+        "duplicate-frame and flash scan"
+      ]
+    },
+    "measured": {
+      "sections_s": {
+        "intro": [
+          0.0,
+          20.27
+        ],
+        "main": [
+          20.27,
+          171.3
+        ],
+        "outro": [
+          171.3,
+          187.5
+        ]
+      },
+      "section_share_of_edit": {
+        "intro": 0.108,
+        "main": 0.805,
+        "outro": 0.086
+      },
+      "clip_count": {
+        "intro": 8,
+        "main": 40,
+        "outro": 5,
+        "total": 53
+      },
+      "clip_length_s": {
+        "intro": {
+          "mean": 2.53,
+          "median": 2.61,
+          "p10": 1.79,
+          "p90": 3.14,
+          "min": 1.13,
+          "max": 3.7
+        },
+        "main": {
+          "mean": 3.78,
+          "median": 3.55,
+          "p10": 1.6,
+          "p90": 6.65,
+          "min": 0.73,
+          "max": 8.6
+        },
+        "outro": {
+          "mean": 3.24,
+          "median": 3.33,
+          "p10": 2.43,
+          "p90": 3.98,
+          "min": 1.93,
+          "max": 4.37
+        }
+      },
+      "transitions": "All 52 boundaries are hard cuts: no flashes, fades or dissolves found. One possible fast push-in with blur on the last ~4 frames before the intro-to-main cut (moderate confidence).",
+      "slow_motion": "No evidence: 0.2% duplicated frames, no freeze runs.",
+      "letterbox": "None. The edit itself is full-frame 16:9.",
+      "beat_sync": {
+        "cuts_on_beat_pct_80ms": 36,
+        "random_baseline_pct": 34,
+        "music_bpm_estimate": 129.2,
+        "verdict": "Cuts are NOT beat-locked in the reference. Beat placement stays optional."
+      },
+      "wide_share_estimate": "about 20% of main (by eye from 37 sampled frames; low confidence)",
+      "intro_to_main_pattern": "intro ends on a player close-up, then a 0.73 s wide shot, then the close-up of the same action (4.43 s)."
+    },
+    "owner_spec_vs_reference": [
+      "LETTERBOX: owner spec asks for a 2:1 block with black bars; the reference edit has none. Spec followed (render_spec.letterbox.enabled=true). Set it to false to match the reference.",
+      "LETTERBOX FILTER: the filter as written leaves 16:9 footage un-barred and crashes on vertical footage (tested). A corrected filter with an added crop is used. The original is kept in render_spec.letterbox.filter_as_written.",
+      "FPS: the reference is 30 fps; spec says 60. Spec followed. 24/25/30 fps sources get duplicated frames, not new motion.",
+      "LENGTH: the reference music is 163.28 s but its visuals run 187.5 s. Rule: final length = audible end of the music; section sizes scale by share.",
+      "PACING: the reference is moderate (main median 3.55 s), not very fast. Follow the measured distribution.",
+      "TEXT: the reference carries on-screen notes for the AI. The final render never has any text."
+    ]
+  },
+  "render_spec": {
+    "container": "mp4",
+    "movflags": "+faststart",
+    "canvas": {
+      "width": 1920,
+      "height": 1080
+    },
+    "fps": 60,
+    "video": {
+      "codec": "libx264",
+      "crf": 18,
+      "preset": "slow",
+      "pix_fmt": "yuv420p",
+      "profile": "high",
+      "scaler": "lanczos"
+    },
+    "audio": {
+      "codec": "aac",
+      "bitrate": "192k",
+      "sample_rate": 44100,
+      "channels": 2,
+      "fade_out_s": 0.5,
+      "limiter": 0.89
+    },
+    "letterbox": {
+      "enabled": true,
+      "content_width": 1920,
+      "content_height": 960,
+      "bar_height": 60,
+      "filter": "scale=1920:960:force_original_aspect_ratio=increase:flags=lanczos,crop=1920:960,pad=1920:1080:0:60:color=black,setsar=1",
+      "filter_as_written": "scale=1920:960:force_original_aspect_ratio=increase,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black",
+      "filter_no_letterbox": "scale=1920:1080:force_original_aspect_ratio=increase:flags=lanczos,crop=1920:1080,setsar=1",
+      "note": "Scale-to-cover then centre-crop: no stretching, no squashing. Costs the top and bottom 11% of a 16:9 frame."
+    },
+    "text_overlays": {
+      "allowed": false,
+      "title_cards": false,
+      "end_cards": false,
+      "watermarks": false
+    }
+  },
+  "timeline_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "timeline"
+    ],
+    "properties": {
+      "timeline": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "shot_id",
+            "section",
+            "shot_type",
+            "source_video_file",
+            "trim_start",
+            "duration",
+            "transition",
+            "speed_multiplier"
+          ],
+          "properties": {
+            "shot_id": {
+              "type": "string",
+              "pattern": "^S[0-9]{3}$",
+              "description": "S001, S002 ... in playback order, no gaps."
+            },
+            "section": {
+              "type": "string",
+              "enum": [
+                "intro",
+                "main",
+                "outro"
+              ]
+            },
+            "shot_type": {
+              "type": "string",
+              "enum": [
+                "after_match",
+                "ball_receive_pass",
+                "bus_arrival",
+                "celebration",
+                "close_skill",
+                "dressing_room",
+                "duel_1v1",
+                "face",
+                "fans_crowd",
+                "goal",
+                "good_pass_chance",
+                "near_miss_shot",
+                "penalty_goal",
+                "player_exit_bus_or_tunnel",
+                "player_portrait",
+                "run_making",
+                "semi_close",
+                "stylized_atmosphere",
+                "training",
+                "trophy_ceremony",
+                "tunnel_entry",
+                "unclassified",
+                "wide"
+              ]
+            },
+            "source_video_file": {
+              "type": "string",
+              "x-runtime-enum": "available_sources",
+              "description": "Exact file name from the provided list. Never invent one."
+            },
+            "trim_start": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Seconds into the source where the clip starts."
+            },
+            "duration": {
+              "type": "number",
+              "minimum": 0.6,
+              "maximum": 9.0,
+              "description": "Seconds this clip occupies on the output timeline."
+            },
+            "transition": {
+              "type": "string",
+              "enum": [
+                "hard_cut",
+                "zoom_punch_cut"
+              ],
+              "description": "How the cut INTO this shot looks. zoom_punch_cut = quick push-in with blur on the last 0.15 s of the previous clip, then a hard cut."
+            },
+            "speed_multiplier": {
+              "type": "number",
+              "minimum": 0.5,
+              "maximum": 1.5,
+              "description": "1.0 = real time. Source seconds used = duration x speed_multiplier."
+            }
+          }
+        }
+      }
+    }
+  },
+  "constraints": {
+    "id_pattern": "^S[0-9]{3}$",
+    "min_source_duration_s": 4.0,
+    "total_tolerance_s": 0.05,
+    "target_length": "floor(audible_end_of_music x 2) / 2 seconds",
+    "min_usable_fraction": 0.85,
+    "section_order": [
+      "intro",
+      "main",
+      "outro"
+    ],
+    "sections": {
+      "intro": {
+        "share": 0.108,
+        "min_s_if_video_over_120s": 15.0,
+        "max_s": 20.0,
+        "min_clip_s": 1.1,
+        "max_clip_s": 4.0,
+        "allowed_types": [
+          "bus_arrival",
+          "player_exit_bus_or_tunnel",
+          "dressing_room",
+          "fans_crowd",
+          "player_portrait",
+          "stylized_atmosphere",
+          "trophy_ceremony",
+          "celebration",
+          "training",
+          "unclassified"
+        ]
+      },
+      "main": {
+        "share": 0.805,
+        "min_clip_s": 1.2,
+        "max_clip_s": 9.0,
+        "opener_wide_min_s": 0.6,
+        "opener_wide_max_s": 1.2,
+        "allowed_types": [
+          "wide",
+          "close_skill",
+          "semi_close",
+          "duel_1v1",
+          "run_making",
+          "ball_receive_pass",
+          "good_pass_chance",
+          "goal",
+          "penalty_goal",
+          "near_miss_shot",
+          "face",
+          "unclassified"
+        ]
+      },
+      "outro": {
+        "share": 0.086,
+        "min_s": 10.0,
+        "max_s": 18.0,
+        "min_clip_s": 1.5,
+        "max_clip_s": 5.0,
+        "allowed_types": [
+          "after_match",
+          "celebration",
+          "tunnel_entry",
+          "player_portrait",
+          "unclassified"
+        ]
+      }
+    },
+    "speed": {
+      "default": 1.0,
+      "min": 0.8,
+      "max": 1.0,
+      "note": "Hard schema range is 0.5-1.5; values outside 0.8-1.0 raise a warning."
+    },
+    "transitions": {
+      "default": "hard_cut",
+      "zoom_punch_cut_max_uses": 1,
+      "zoom_punch_cut_only_on": "first shot of main"
+    },
+    "wide_share_max_of_main": 0.25,
+    "wide_share_target_of_main": 0.2,
+    "face_clips_max": 2,
+    "goal_clips_max": 3,
+    "penalty_goal_clips_max": 1,
+    "first_goal_window_s": [
+      30.0,
+      90.0
+    ],
+    "no_overlap_same_source": true,
+    "prefer_different_source_than_previous": true,
+    "beat_sync": {
+      "required": false,
+      "default": "off",
+      "snap_tolerance_s": 0.12
+    }
+  },
+  "planning_rulebook": {
+    "global": [
+      "G1 The video is intro, then main, then outro. Nothing else. The video ends with the outro.",
+      "G2 Video length equals the music. Section sizes scale by share, with the intro held to 15-20 s on normal-length videos.",
+      "G3 Use only file names from the provided list and only windows that exist inside those files.",
+      "G4 Never reuse overlapping footage.",
+      "G5 No text, titles, labels or end cards on the video.",
+      "G6 When footage runs short, drop optional clip types first (goal, face, pass) and say so. Never invent footage."
+    ],
+    "intro": {
+      "target_s": "15-20",
+      "order_of_preference": [
+        "bus_arrival",
+        "player_exit_bus_or_tunnel",
+        "dressing_room",
+        "fans_crowd",
+        "celebration",
+        "stylized_atmosphere",
+        "trophy_ceremony",
+        "training"
+      ],
+      "rules": [
+        "I1 Start with a bus-arrival scene. If none exists, start with the target player coming out of the bus or tunnel.",
+        "I2 Then dressing-room clips (the player's jersey or his moment in the dressing room) and a little fan footage if any.",
+        "I3 Use at most one celebration clip, and only to fill time.",
+        "I4 Training clips are the last resort when intro footage is short.",
+        "I5 Stylised atmosphere clips (fireworks, fans with flags, stadium, trophy ceremony) are allowed to fill the intro.",
+        "I6 Pace: about 8 clips of 1.1-4.0 s (median 2.6 s) for a 20 s intro."
+      ]
+    },
+    "intro_to_main": [
+      "T1 End the intro on a close-up of the player.",
+      "T2 Switch with a quick push-in with blur on the last 0.15 s, then a hard cut (transition=zoom_punch_cut on the first main shot).",
+      "T3 The first main shot is a wide clip of 0.6-1.2 s, immediately followed by the close-up part of the same action."
+    ],
+    "main": {
+      "rules": [
+        "M1 Cut mostly on hard cuts. Median clip 3.5 s, 10th to 90th percentile 1.6-6.7 s, longest 9 s.",
+        "M2 Rhythm: 2-4 close or semi-close skill clips, then 1-3 wide clips, then repeat.",
+        "M3 Skill clips are dribbling, ball receiving, passing, run-making and 1v1 duels. Run-making counts as a skill clip.",
+        "M4 Wide clips of the player must be chosen so the cut looks like a match cut (similar position, direction and action as the clip before or after).",
+        "M5 Look for match-up cuts between clips and place those clips together.",
+        "M6 Goals: 1-3 goal clips spread through the main part. If the sources have none, use none. Show the first goal (or a worthwhile near miss) between 0:30 and 1:30 of the video.",
+        "M7 Cut a long goal clip into short parts and arrange the parts (build-up, shot, finish) instead of playing it whole.",
+        "M8 If a penalty goal exists, use one in the main part.",
+        "M9 Show 1-2 face clips of the player, only if needed.",
+        "M10 Sometimes include a good pass or a chance the player created.",
+        "M11 Wide clips stay at or below 25% of main (target about 20%).",
+        "M12 Speed is 1.0 unless a clip would otherwise be too short."
+      ]
+    },
+    "outro": {
+      "target_s": "10-18, about 8.6% of the video",
+      "rules": [
+        "O1 Use after-match or celebration clips.",
+        "O2 If a clip of the player going into the tunnel exists, end the video on it.",
+        "O3 Pace: about 5 clips of 1.5-5.0 s (median 3.3 s)."
+      ]
+    },
+    "never": [
+      "Do not output any key other than the schema keys.",
+      "Do not invent files, shot types or timestamps.",
+      "Do not exceed the source length.",
+      "Do not add title text, captions or end cards."
+    ]
+  },
+  "pacing_fingerprint": {
+    "note": "Measured clip lengths in seconds from the reference edit, in playback order. The offline fallback planner samples from these.",
+    "intro": [
+      1.13,
+      2.57,
+      2.53,
+      2.07,
+      3.7,
+      2.9,
+      2.73,
+      2.64
+    ],
+    "main": [
+      0.73,
+      4.43,
+      8.2,
+      4.2,
+      1.34,
+      4.53,
+      8.6,
+      1.77,
+      2.03,
+      2.4,
+      5.03,
+      2.87,
+      4.73,
+      5.74,
+      4.13,
+      4.7,
+      6.77,
+      7.33,
+      2.0,
+      2.1,
+      2.7,
+      4.87,
+      0.86,
+      2.74,
+      2.56,
+      2.57,
+      3.13,
+      4.7,
+      1.3,
+      5.0,
+      3.97,
+      2.17,
+      4.96,
+      6.64,
+      2.4,
+      2.8,
+      1.63,
+      1.77,
+      4.13,
+      6.5
+    ],
+    "outro": [
+      3.17,
+      3.4,
+      1.93,
+      3.33,
+      4.37
+    ]
+  },
+  "timeline_item_example": {
+    "shot_id": "S009",
+    "section": "main",
+    "shot_type": "wide",
+    "source_video_file": "s02.mp4",
+    "trim_start": 312.4,
+    "duration": 0.73,
+    "transition": "zoom_punch_cut",
+    "speed_multiplier": 1.0
+  }
+}
