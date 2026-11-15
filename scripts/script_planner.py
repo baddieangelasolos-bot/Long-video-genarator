@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import catalog_tools as ct  # noqa: E402
+import plan_report  # noqa: E402
 import timeline_core as core  # noqa: E402
 
 log = logging.getLogger("planner")
@@ -36,7 +38,7 @@ MODEL_FALLBACK_CHAIN = [
     "gemini-2.0-flash-lite",
 ]
 REQUEST_TIMEOUT_S = 75     # per request; a hanging model must not eat the whole run
-MAX_CATALOG_LINES = 320    # keeps the prompt small enough for lite models
+MAX_CATALOG_LINES = 360    # keeps the prompt small enough for lite models; the sample keeps every type and source (balanced_sample)
 
 
 # --------------------------------------------------------------------------- #
@@ -100,7 +102,15 @@ def build_prompt(ctx: dict, errors: list[str] | None = None, previous: str | Non
     ]
     cat = ctx.get("catalog") or []
     if cat:
-        top = sorted(cat, key=lambda g: -g["quality"])[:MAX_CATALOG_LINES]
+        top = ct.balanced_sample(cat, MAX_CATALOG_LINES)
+        lines.append("SUPPLY_SECONDS_BY_TYPE (whole catalog): " + json.dumps(ct.supply_by_type(cat)))
+        lines.append("MUST (checked by code, a plan that breaks one is rejected): "
+                     "(1) skill clips (close_skill, semi_close, duel_1v1, run_making, ball_receive_pass, good_pass_chance) are at least "
+                     f"{int(cons.get('skill_share_min_of_main', 0.5) * 100)}% of the main part and goals never fill it; "
+                     "(2) if bus_arrival, player_exit_bus_or_tunnel or dressing_room exist, the intro opens with bus_arrival (else player_exit) "
+                     "and then uses the others before fans or celebration; "
+                     "(3) a celebration clip in main comes ONLY directly after a goal or penalty_goal clip (same source, within 25 s after it, "
+                     "at most 3 s); (4) build each goal from 2-3 short parts in time order; (5) quality 2 segments only when a section would be short.")
         lines.append("CATALOG (file|start|end|shot_type|quality). A shot's whole window must sit inside ONE catalog "
                      "segment of the same shot_type:")
         lines += [f"{g['source_video_file']}|{g['start']}|{g['end']}|{g['shot_type']}|{g['quality']}" for g in top]
@@ -273,255 +283,8 @@ def plan_with_gemini(ctx: dict, client: Any, models: list[str], max_repairs: int
     return None, report
 
 
-# --------------------------------------------------------------------------- #
-# Offline safe-mode planner (no AI)
-# --------------------------------------------------------------------------- #
-class NeedsMoreSource(Exception):
-    """The footage ran out before the video reached its target length (maps to exit code 3)."""
-
-
-def supply_report(catalog: list[dict]) -> str:
-    """Seconds of footage per shot type, for the 'NEEDS MORE SOURCE VIDEO' message."""
-    tot: dict[str, float] = {}
-    for g in catalog:
-        tot[g["shot_type"]] = tot.get(g["shot_type"], 0.0) + g["end"] - g["start"]
-    return ", ".join(f"{k} {v:.0f}s" for k, v in sorted(tot.items(), key=lambda kv: -kv[1]))
-
-def auto_catalog(sources: dict) -> list[dict]:
-    """With no catalog every source is one 'unclassified' segment (content-blind)."""
-    return [{"source_video_file": k, "start": 0.0, "end": round(v["duration"] - 0.05, 3),
-             "shot_type": "unclassified", "quality": 3} for k, v in sources.items()]
-
-
-class _Footage:
-    """Tracks used windows so the offline planner never reuses overlapping footage."""
-
-    def __init__(self, catalog: list[dict], rng: random.Random):
-        self.cat, self.rng = catalog, rng
-        self.used: dict[str, list[tuple[float, float]]] = {}
-
-    def _gaps(self, seg: dict) -> list[tuple[float, float]]:
-        a, b = seg["start"], seg["end"]
-        gaps, cur = [], a
-        for u0, u1 in sorted(self.used.get(seg["source_video_file"], [])):
-            if u1 <= cur or u0 >= b:
-                continue
-            if u0 - cur > 0:
-                gaps.append((cur, min(u0, b)))
-            cur = max(cur, u1)
-        if b - cur > 0:
-            gaps.append((cur, b))
-        return [(x + 0.25, y - 0.0) for x, y in gaps if y - x >= 0.6]  # 0.25 s guard after used footage
-
-    def take(self, types: list[str], want: float, lo: float, hi: float, avoid: str | None,
-             section: str, shot_type_label: str | None = None, randomise: bool = False) -> dict | None:
-        best = None
-        for t_rank, typ in enumerate(types):
-            cands = []
-            for seg in self.cat:
-                if seg["shot_type"] != typ:
-                    continue
-                for g0, g1 in self._gaps(seg):
-                    if g1 - g0 >= lo:
-                        score = (t_rank, seg["source_video_file"] == avoid, -seg["quality"], self.rng.random())
-                        cands.append((score, seg, g0, g1))
-            if cands:
-                best = min(cands, key=lambda c: c[0])
-                break
-        if best is None:
-            return None
-        _, seg, g0, g1 = best
-        d = round(max(lo, min(want, hi, g1 - g0)), 3)
-        slack = (g1 - g0) - d
-        start = g0 + (self.rng.uniform(0, slack) if randomise and slack > 0 else 0.0)
-        start = round(start, 3)
-        self.used.setdefault(seg["source_video_file"], []).append((start, start + d))
-        return {"shot_id": "S000", "section": section, "shot_type": shot_type_label or seg["shot_type"],
-                "source_video_file": seg["source_video_file"], "trim_start": start, "duration": d,
-                "transition": "hard_cut", "speed_multiplier": 1.0}
-
-
-def local_plan(ctx: dict, seed: int = 7) -> dict | None:
-    """
-    Deterministic planner following the rulebook as closely as the catalog allows.
-    With no catalog it is content-blind (all 'unclassified'): structure and pacing are right, scene choice is not.
-    """
-    tpl, target = ctx["template"], ctx["target_s"]
-    rng = random.Random(seed)
-    cat = ctx.get("catalog") or auto_catalog(ctx["sources"])
-    blind = all(g["shot_type"] == "unclassified" for g in cat)
-    foot = _Footage(cat, rng)
-    budgets = core.section_budgets(target, tpl)
-    fp = tpl["pacing_fingerprint"]
-    cons = tpl["constraints"]["sections"]
-    ANY = ["unclassified"]
-    shots: list[dict] = []
-    capped = {"face", "goal", "penalty_goal", "near_miss_shot", "wide"}   # never used as generic filler
-
-    def filler(section: str) -> list[str]:
-        """Any other allowed type for this section, used only when the preferred pools are exhausted."""
-        return [t for t in cons[section]["allowed_types"] if t not in capped]
-
-    def pace(section: str, i: int) -> float:
-        base = fp[section][i % len(fp[section])]
-        return base * rng.uniform(0.9, 1.1)
-
-    def fill(section: str, budget: float, pick: Callable[[float, int], dict | None]) -> None:
-        got, i, misses = 0.0, 0, 0
-        while got < budget - 0.5 and misses < 6:
-            s = pick(budget - got, i)
-            if s is None:
-                misses += 1
-                continue
-            shots.append(s)
-            got += s["duration"]
-            i += 1
-
-    # ---- intro: preference order, one celebration max, training last -----------------------
-    intro_pref = tpl["planning_rulebook"]["intro"]["order_of_preference"]
-    intro_cfg = cons["intro"]
-    used_intro_types: list[str] = []
-
-    def pick_intro(left: float, i: int) -> dict | None:
-        want = min(pace("intro", i), left)
-        want = max(want, intro_cfg["min_clip_s"])
-        if blind:
-            return foot.take(ANY, want, intro_cfg["min_clip_s"], intro_cfg["max_clip_s"],
-                             shots[-1]["source_video_file"] if shots else None, "intro", randomise=True)
-        order = [t for t in intro_pref if t not in used_intro_types or t in ("fans_crowd", "dressing_room",
-                                                                            "stylized_atmosphere")]
-        if sum(1 for s in shots if s["section"] == "intro" and s["shot_type"] == "celebration") >= 1:
-            order = [t for t in order if t != "celebration"]
-        prev = shots[-1]["source_video_file"] if shots else None
-        # keep the preferred order moving forward (bus -> dressing room -> fans -> ...): try later types first
-        last = max((intro_pref.index(t) for t in used_intro_types if t in intro_pref), default=-1)
-        forward = [t for t in order if t in intro_pref and intro_pref.index(t) >= last]
-        s = foot.take(forward, want, intro_cfg["min_clip_s"], intro_cfg["max_clip_s"], prev, "intro") \
-            or foot.take(order + ["player_portrait"], want, intro_cfg["min_clip_s"], intro_cfg["max_clip_s"], prev, "intro") \
-            or foot.take(filler("intro"), want, intro_cfg["min_clip_s"], intro_cfg["max_clip_s"], prev, "intro")
-        if s:
-            used_intro_types.append(s["shot_type"])
-        return s
-
-    fill("intro", budgets["intro"], pick_intro)
-
-    # ---- main: wide opener, 2-4 close then 1-3 wide, goals / penalty / face placed by time ---
-    main_cfg = cons["main"]
-    close_pool = ["close_skill", "semi_close", "duel_1v1", "run_making", "ball_receive_pass"]
-    wide_pool = ["wide"]
-    elapsed = lambda: sum(s["duration"] for s in shots)  # noqa: E731
-    state = {"goals": 0, "pen": 0, "face": 0, "wide_t": 0.0, "main_t": 0.0, "queue": []}
-    main_start = elapsed()
-
-    def add_main(s: dict | None) -> dict | None:
-        if s:
-            state["main_t"] += s["duration"]
-            if s["shot_type"] == "wide":
-                state["wide_t"] += s["duration"]
-        return s
-
-    # opener: wide followed by the close-up of the same action
-    if not blind:
-        op = add_main(foot.take(wide_pool, 0.73, main_cfg["opener_wide_min_s"], main_cfg["opener_wide_max_s"],
-                                shots[-1]["source_video_file"] if shots else None, "main"))
-        if op:
-            op["transition"] = "zoom_punch_cut" if any(s["section"] == "intro" for s in shots) else "hard_cut"
-            shots.append(op)
-
-    def pick_main(left: float, i: int) -> dict | None:
-        t = elapsed()
-        want = min(pace("main", i), left)
-        avoid = shots[-1]["source_video_file"] if shots else None
-        if blind:
-            return add_main(foot.take(ANY, max(want, main_cfg["min_clip_s"]), main_cfg["min_clip_s"],
-                                      main_cfg["max_clip_s"], avoid, "main", randomise=True))
-        # time-triggered specials (rules M6, M8, M9, M10)
-        if state["goals"] < 3 and t >= 35.0 and state["main_t"] > 0 and (i % 9 == 0):
-            s = foot.take(["goal", "near_miss_shot"], min(want, 3.0), main_cfg["min_clip_s"], 4.0, avoid, "main")
-            if s:
-                state["goals"] += 1
-                return add_main(s)
-        if state["pen"] < 1 and t >= 90.0:
-            s = foot.take(["penalty_goal"], min(want, 3.0), main_cfg["min_clip_s"], 4.0, avoid, "main")
-            state["pen"] += 1
-            if s:
-                return add_main(s)
-        if state["face"] < 1 and state["main_t"] > 0.4 * (budgets["main"]):
-            s = foot.take(["face"], min(want, 2.5), main_cfg["min_clip_s"], 3.5, avoid, "main")
-            state["face"] += 1
-            if s:
-                return add_main(s)
-        # rhythm: a run of 2-4 close clips, then 1-3 wide clips
-        if not state["queue"]:
-            n_close, n_wide = rng.randint(2, 4), rng.randint(1, 3)
-            state["queue"] = ["c"] * n_close + ["w"] * n_wide
-        kind = state["queue"].pop(0)
-        wide_ok = state["wide_t"] <= 0.22 * max(state["main_t"], 1.0)
-        pools = wide_pool if (kind == "w" and wide_ok) else close_pool + ["good_pass_chance"]
-        s = foot.take(pools, want, main_cfg["min_clip_s"], main_cfg["max_clip_s"], avoid, "main")
-        if s is None and pools is not close_pool:  # pool empty -> try the other one
-            s = foot.take(close_pool, want, main_cfg["min_clip_s"], main_cfg["max_clip_s"], avoid, "main")
-        if s is None:                               # last resort: any other allowed type
-            s = foot.take(filler("main"), want, main_cfg["min_clip_s"], main_cfg["max_clip_s"], avoid, "main")
-        if s is None:                               # then the capped-but-legal types, never beyond the template caps
-            gc = tpl["constraints"]
-            for typ, capn in (("near_miss_shot", 99), ("goal", gc["goal_clips_max"] * 4),
-                              ("penalty_goal", gc["penalty_goal_clips_max"] * 4), ("face", gc["face_clips_max"])):
-                if sum(1 for x in shots if x["shot_type"] == typ) < capn:
-                    s = foot.take([typ], min(want, 3.5), main_cfg["min_clip_s"], 4.5, avoid, "main")
-                    if s:
-                        break
-        return add_main(s)
-
-    fill("main", budgets["main"] - (state["main_t"]), pick_main)
-
-    # ---- outro: after-match / celebration, ending on the tunnel clip when one exists -------
-    out_cfg = cons["outro"]
-    tunnel = None if (blind or budgets["outro"] < out_cfg["min_clip_s"]) else foot.take(["tunnel_entry"], 3.3, out_cfg["min_clip_s"], out_cfg["max_clip_s"],
-                                          None, "outro")
-
-    def pick_outro(left: float, i: int) -> dict | None:
-        want = max(out_cfg["min_clip_s"], min(pace("outro", i), left))
-        if blind:
-            return foot.take(ANY, want, out_cfg["min_clip_s"], out_cfg["max_clip_s"],
-                             shots[-1]["source_video_file"] if shots else None, "outro", randomise=True)
-        prev = shots[-1]["source_video_file"] if shots else None
-        return foot.take(["after_match", "celebration", "player_portrait"], want, out_cfg["min_clip_s"],
-                         out_cfg["max_clip_s"], prev, "outro") \
-            or foot.take(filler("outro"), want, out_cfg["min_clip_s"], out_cfg["max_clip_s"], prev, "outro")
-
-    fill("outro", budgets["outro"] - (tunnel["duration"] if tunnel else 0.0), pick_outro)
-    if tunnel:
-        shots.append(tunnel)
-
-    plan, notes = core.repair({"timeline": shots}, ctx)
-    errs, warns = core.validate(plan, ctx)
-    if errs:
-        log.error("Offline planner could not satisfy the rules: %s", "; ".join(errs[:4]))
-        got = sum(x["duration"] for x in plan["timeline"])
-        if got < target - core.section_budgets(target, tpl)["intro"] * 0 - tpl["constraints"]["total_tolerance_s"]:
-            raise NeedsMoreSource(f"planned only {got:.0f}s of {target:.0f}s; supply: {supply_report(cat)}")
-        return None
-    plan["_notes"] = notes + warns + (["content-blind safe mode: no shot labels were available"] if blind else [])
-    return plan
-
-
-def local_plan_robust(ctx: dict, seed: int = 7, tries: int = 8) -> dict | None:
-    """The offline planner is seed-dependent; try a few seeds (deterministic order) before giving up."""
-    last: NeedsMoreSource | None = None
-    for k in range(tries):
-        try:
-            plan = local_plan(ctx, seed + k)
-        except NeedsMoreSource as exc:
-            last = exc
-            continue
-        if plan:
-            if k:
-                log.info("Offline planner: seed %d did not satisfy the rules, seed %d did", seed, seed + k)
-            return plan
-    if last:
-        raise last
-    return None
+from offline_planner import (NeedsMoreSource, _Footage, auto_catalog, local_plan, local_plan_robust,  # noqa: E402,F401
+                             supply_report)
 
 
 # --------------------------------------------------------------------------- #
@@ -533,6 +296,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--sources-dir", required=True, help="folder with the raw source clips")
     ap.add_argument("--music", required=True, help="background music file")
     ap.add_argument("--catalog", default=None, help="optional shot catalog JSON (labels from a classifier stage)")
+    ap.add_argument("--dups", default=None, help="excluded duplicate ranges JSON (from dup_scan.py)")
     ap.add_argument("--out", default="build/timeline.json")
     ap.add_argument("--no-ai", action="store_true", help="skip Gemini, use the offline planner only")
     ap.add_argument("--require-ai", action="store_true", help="fail (exit 4) instead of using the offline planner")
@@ -563,7 +327,10 @@ def main(argv: list[str] | None = None, client_factory: Callable[[], Any] = make
 
     target = core.target_length(audible)
     ctx: dict[str, Any] = {"template": tpl, "sources": sources, "target_s": target, "catalog": []}
-    ctx["catalog"] = load_catalog(args.catalog, ctx)
+    ctx["dups"] = ct.load_dups(args.dups)
+    ctx["catalog"] = ct.subtract_ranges(load_catalog(args.catalog, ctx), ctx["dups"])
+    if ctx["dups"]:
+        log.info("Duplicate footage: %d excluded range(s)", len(ctx["dups"]))
     log.info("Music audible end %.2fs -> target %.1fs | %d sources", audible, target, len(sources))
 
     # Halt rule: not enough footage at all (checked before spending any API call)
@@ -611,6 +378,7 @@ def main(argv: list[str] | None = None, client_factory: Callable[[], Any] = make
         "music_audible_end_s": round(audible, 3),
         "section_budgets_s": core.section_budgets(target, tpl),
         "timeline": plan["timeline"],
+        "_report": plan_report.build(ctx, plan["timeline"], planner_name),
     }
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(out, indent=2), encoding="utf-8")
