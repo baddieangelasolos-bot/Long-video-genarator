@@ -33,28 +33,28 @@ log = logging.getLogger("classify_shots")
 PER_SHEET = 8          # must equal `per` in pipeline/shots2.py
 
 GUIDE = {
-    "wide": "broad stadium/pitch view, players small",
+    "wide": "broad stadium/pitch view, players small (use for open play seen from far away)",
     "close_skill": "tight or medium-close on the featured player dribbling / doing skills",
     "semi_close": "medium shot, featured player clearly visible with the ball, less tight than close_skill",
     "duel_1v1": "featured player against one defender",
     "run_making": "featured player running or carrying the ball at pace, off-ball runs",
     "ball_receive_pass": "receiving or playing a pass",
     "good_pass_chance": "key pass or chance creation",
-    "goal": "a goal being scored (ball in the net)",
+    "goal": "the ball visibly goes into the net or the net moves; only the moment of a goal (rare: in most reels under 15% of rows)",
     "penalty_goal": "a penalty kick being scored",
     "near_miss_shot": "shot saved, blocked or off target",
     "face": "close-up of a face",
-    "celebration": "celebrating (after a goal or at the end)",
-    "bus_arrival": "team bus or arrival at the stadium",
-    "player_exit_bus_or_tunnel": "someone stepping off a bus or walking out through a tunnel",
-    "dressing_room": "dressing room",
+    "celebration": "players celebrating, hugging, running to the corner flag (after a goal or at the end)",
+    "bus_arrival": "team coach/bus driving in or parked, fans around it, players arriving at the stadium by vehicle",
+    "player_exit_bus_or_tunnel": "a player stepping off the bus, walking from the bus into the stadium, or walking out of the tunnel to the pitch",
+    "dressing_room": "inside the locker room: shirts on pegs, players sitting or getting ready, boots, team talk",
     "fans_crowd": "fans, supporters, a crowd",
     "player_portrait": "posed or portrait shot of one person",
     "stylized_atmosphere": "aerial view, crest, artistic stadium atmosphere",
     "trophy_ceremony": "trophy, medals, ceremony",
     "training": "training or warm-up",
     "after_match": "post-match scenes",
-    "tunnel_entry": "entering or leaving through the tunnel",
+    "tunnel_entry": "a player walking INTO or inside the tunnel, heading to the dressing room",
 }
 
 
@@ -72,6 +72,9 @@ def build_prompt(ids: list[str], types: list[str]) -> str:
         "Label EVERY row with exactly one shot_type from this list:\n" + lines + "\n"
         "- reject: referee, bench or staff close-ups, replays or graphics overlays, scoreboards, black or blurred "
         "frames, anything unusable\n"
+        "This footage comes from highlight compilations: most rows are open play, so label dribbling, ball control, passes, "
+        "runs and 1v1 duels with the matching skill type and keep \"goal\" for the moment the ball is in the net. "
+        "Phone-quality or shaky bus, tunnel and dressing-room scenes are still valuable: label them, with a low quality number.\n"
         "Also give quality 1-5 (5 = sharp, steady, clearly framed; 1 = blurry, shaky, obstructed). "
         "Judge only what is visible. Do not identify anyone by face. If unsure use \"reject\" with quality 1.\n"
         "Return JSON only, exactly: {\"rows\":[{\"id\":\"<row id>\",\"shot_type\":\"<type>\",\"quality\":<1-5>}]} "
@@ -165,7 +168,11 @@ def run(shots_dir: Path, srcs: list[str], template: dict, ask: Callable[..., Any
     seconds: dict[str, float] = {}
     for s in segs:
         seconds[s["shot_type"]] = round(seconds.get(s["shot_type"], 0.0) + s["end"] - s["start"], 1)
+    rejected = sum(1 for v in labels.values() if v[0] == "reject")
+    lowq = sum(1 for v in labels.values() if v[0] != "reject" and v[1] < min_quality)
+    row_s = round(sum(r["e"] - r["s"] for r in all_rows), 1)
     stats = {"rows": len(all_rows), "labelled": len(labels), "sheets": len(jobs), "segments": len(segs),
+             "rejected_rows": rejected, "too_low_quality_rows": lowq, "row_seconds": row_s,
              "seconds_by_type": dict(sorted(seconds.items()))}
     return segs, stats
 
@@ -186,7 +193,7 @@ def main(argv: list[str] | None = None, ask: Callable[..., Any] | None = None) -
     ap.add_argument("--shots-dir", default="/home/claude/work/shots")
     ap.add_argument("--sources", nargs="+", required=True, help="source stems, e.g. s01 s02")
     ap.add_argument("--out", default="/home/claude/work/analysis/shot_catalog.json")
-    ap.add_argument("--min-quality", type=int, default=3)
+    ap.add_argument("--min-quality", type=int, default=2)
     ap.add_argument("--workers", type=int, default=3)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
@@ -200,7 +207,7 @@ def main(argv: list[str] | None = None, ask: Callable[..., Any] | None = None) -
         segs, stats = [], {"rows": 0, "labelled": 0, "sheets": 0, "segments": 0, "seconds_by_type": {}}
         log.warning("No AI available: writing an EMPTY catalog (planner will be content-blind)")
     else:
-        segs, stats = run(Path(args.shots_dir), args.sources, tpl, ask, args.min_quality, args.workers)
+        segs, stats = run(Path(args.shots_dir), args.sources, tpl, ask, args.min_quality, args.workers)   # CLI default is 2 (phone-quality intro scenes count)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(segs, indent=1), encoding="utf-8")
     print("CATALOG " + json.dumps(stats), flush=True)
