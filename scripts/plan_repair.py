@@ -7,6 +7,7 @@ type is not allowed in its section is dropped. Nothing is ever invented, and tim
 """
 from __future__ import annotations
 
+import catalog_tools as ct
 import timeline_core as core
 
 
@@ -15,6 +16,9 @@ def reclamp(shots: list[dict], cons: dict) -> None:
     first_main = next((k for k, s in enumerate(shots) if s["section"] == "main"), None)
     for i, s in enumerate(shots):
         lo, hi = core._clip_limits(shots, i, cons)
+        if s["section"] == "main" and s["shot_type"] == "celebration":
+            hi = min(hi, (cons.get("main_celebration") or {}).get("max_s", hi))
+            lo = min(lo, hi)
         s["duration"] = round(min(hi, max(lo, s["duration"])), 3)
         if s["transition"] == "zoom_punch_cut" and i != first_main:
             s["transition"] = "hard_cut"
@@ -97,3 +101,68 @@ def shed_wide(shots: list[dict], target: float, tpl: dict, notes: list[str]) -> 
         shots.pop(i)
     notes.append("repair: wide clips reduced to respect the wide-share cap")
     return True
+
+
+def trim_overlaps(shots: list[dict], notes: list[str], cons: dict | None = None) -> None:
+    """If a window runs into a later window of the same source, shorten it; if that would break the clip minimum,
+    drop the later shot instead. Compares against the furthest end so far (a long window that swallows two
+    later ones is caught for both)."""
+    drop: set[int] = set()
+    by_src: dict[str, list[int]] = {}
+    for i, s in enumerate(shots):
+        by_src.setdefault(s["source_video_file"], []).append(i)
+    for idxs in by_src.values():
+        idxs.sort(key=lambda k: shots[k]["trim_start"])
+        cur = None                                   # index of the kept shot with the furthest end
+        for ib in idxs:
+            b = shots[ib]
+            if cur is None:
+                cur = ib
+                continue
+            a = shots[cur]
+            end = a["trim_start"] + a["duration"] * a["speed_multiplier"]
+            if end > b["trim_start"] - 0.02:
+                new = round((b["trim_start"] - 0.02 - a["trim_start"]) / a["speed_multiplier"], 3)
+                lo = core._clip_limits(shots, cur, cons)[0] if cons else 0.6
+                if new >= max(0.6, lo):
+                    notes.append(f"repair: shortened {a['shot_id']} by {a['duration'] - new:.2f}s to stop reusing footage")
+                    a["duration"] = new
+                else:
+                    drop.add(ib)
+                    notes.append(f"repair: dropped {b['shot_id']} (it reused footage of another shot)")
+                    continue
+            if b["trim_start"] + b["duration"] * b["speed_multiplier"] > shots[cur]["trim_start"] + shots[cur]["duration"] * shots[cur]["speed_multiplier"]:
+                cur = ib
+    if drop:
+        shots[:] = [s for i, s in enumerate(shots) if i not in drop]
+
+
+def drop_dups(shots: list[dict], ctx: dict, notes: list[str]) -> None:
+    """Footage that exists twice is used once: a shot inside an excluded duplicate range is dropped (the fit step refills)."""
+    dups = ctx.get("dups") or []
+    if not dups:
+        return
+    keep = []
+    for s in shots:
+        d = ct.overlaps_dup(s["source_video_file"], s["trim_start"], s["trim_start"] + s["duration"] * s["speed_multiplier"], dups)
+        if d:
+            notes.append(f"repair: dropped {s['shot_id']} (same footage as {d.get('dup_of', 'another place')})")
+        else:
+            keep.append(s)
+    shots[:] = keep
+
+
+def fix_celebration(shots: list[dict], cons: dict, notes: list[str]) -> None:
+    """Rule M14: a celebration in the main part stays only directly after a goal / penalty goal, once, at most max_s long."""
+    cel = cons.get("main_celebration") or {}
+    ok_prev = set(cel.get("only_directly_after", ["goal", "penalty_goal"]))
+    keep: list[dict] = []
+    for s in shots:
+        if s["section"] == "main" and s["shot_type"] == "celebration":
+            prev = keep[-1] if keep else None
+            if not prev or prev["section"] != "main" or prev["shot_type"] not in ok_prev:
+                notes.append(f"repair: dropped {s['shot_id']} (celebration is only allowed directly after a goal)")
+                continue
+            s["duration"] = round(min(s["duration"], cel.get("max_s", 3.0)), 3)
+        keep.append(s)
+    shots[:] = keep
