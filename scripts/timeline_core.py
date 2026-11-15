@@ -301,9 +301,12 @@ def validate(plan: dict, ctx: dict) -> tuple[list[str], list[str]]:
             (s["trim_start"], s["trim_start"] + s["duration"] * s["speed_multiplier"], s["shot_id"]))
     for name, wins in by_src.items():
         wins.sort()
-        for a, b in zip(wins, wins[1:]):
-            if b[0] < a[1] - 1e-6:
-                errors.append(f"E-OVERLAP: {a[2]} and {b[2]} reuse the same footage of {name}")
+        far = wins[0]
+        for b in wins[1:]:
+            if b[0] < far[1] - 1e-6:
+                errors.append(f"E-OVERLAP: {far[2]} and {b[2]} reuse the same footage of {name}")
+            if b[1] > far[1]:
+                far = b
 
     # ---- special clip caps and wide share ---------------------------------
     types = [s["shot_type"] for s in shots]
@@ -367,6 +370,10 @@ def validate(plan: dict, ctx: dict) -> tuple[list[str], list[str]]:
     if outro_shots and outro_shots[-1]["shot_type"] != "tunnel_entry" and \
             any(c["shot_type"] == "tunnel_entry" for c in (ctx.get("catalog") or [])):
         warns.append("W-O2: tunnel_entry footage exists but the video does not end on it")
+    import comp_rules                      # what is IN the video: skills lead, intro scenes used, celebration after goals, no duplicates
+    ce, cw = comp_rules.check(shots, ctx, strict=ctx.get("strict_comp", True))
+    errors += ce
+    warns += cw
     return errors, warns
 
 
@@ -451,6 +458,8 @@ def repair(plan: dict, ctx: dict) -> tuple[dict, list[str]]:
     import plan_repair as pr               # catalog truth, disallowed types, wide cap (kept in its own module)
     pr.apply_catalog(shots, ctx, notes)
     pr.drop_disallowed(shots, cons, notes)
+    pr.drop_dups(shots, ctx, notes)
+    pr.fix_celebration(shots, cons, notes)
     pr.reclamp(shots, cons)
     _trim_overlaps(shots, notes, cons)
     pr.reclamp(shots, cons)
@@ -469,6 +478,10 @@ def _clip_limits(shots: list[dict], i: int, cons: dict) -> tuple[float, float]:
     first_main = next((k for k, s in enumerate(shots) if s["section"] == "main"), None)
     if i == first_main and shots[i]["shot_type"] == "wide":
         return cfg["opener_wide_min_s"], cfg["opener_wide_max_s"]
+    if shots[i]["section"] == "main" and shots[i]["shot_type"] == "celebration":      # rule M14: short, right after its goal
+        cel = cons.get("main_celebration", {})
+        hi = min(cfg["max_clip_s"], cel.get("max_s", cfg["max_clip_s"]))
+        return min(cfg["min_clip_s"], hi), hi
     return cfg["min_clip_s"], cfg["max_clip_s"]
 
 
@@ -477,31 +490,8 @@ def _wide_limit(target: float, tpl: dict) -> float:
 
 
 def _trim_overlaps(shots: list[dict], notes: list[str], cons: dict | None = None) -> None:
-    """If a window runs into the next window of the same source, shorten it; if that would break the clip minimum,
-    drop the later of the two shots instead (the fit step then refills the section)."""
-    drop: set[int] = set()
-    by_src: dict[str, list[int]] = {}
-    for i, s in enumerate(shots):
-        by_src.setdefault(s["source_video_file"], []).append(i)
-    for idxs in by_src.values():
-        idxs.sort(key=lambda k: shots[k]["trim_start"])
-        for ia, ib in zip(idxs, idxs[1:]):
-            a, b = shots[ia], shots[ib]
-            if ia in drop or ib in drop:
-                continue
-            end = a["trim_start"] + a["duration"] * a["speed_multiplier"]
-            if end > b["trim_start"] - 0.02:
-                new = round((b["trim_start"] - 0.02 - a["trim_start"]) / a["speed_multiplier"], 3)
-                lo = _clip_limits(shots, ia, cons)[0] if cons else 0.6
-                if new >= max(0.6, lo):
-                    notes.append(f"repair: shortened {a['shot_id']} by {a['duration'] - new:.2f}s to stop reusing footage")
-                    a["duration"] = new
-                else:
-                    gone = max(ia, ib)
-                    drop.add(gone)
-                    notes.append(f"repair: dropped {shots[gone]['shot_id']} (it reused footage of another shot)")
-    if drop:
-        shots[:] = [s for i, s in enumerate(shots) if i not in drop]
+    import plan_repair as pr
+    pr.trim_overlaps(shots, notes, cons)
 
 
 def _room_after(s: dict, sources: dict, cat_idx: dict[str, list[dict]], shots: list[dict]) -> float:
@@ -540,9 +530,7 @@ def _fit_to_budget(shots: list[dict], sources: dict, target: float, tpl: dict,
             caps = []
             for i in idxs:
                 s = shots[i]
-                lo, hi = cfg["min_clip_s"], cfg["max_clip_s"]
-                if i == first_main and s["shot_type"] == "wide":
-                    lo, hi = cfg["opener_wide_min_s"], cfg["opener_wide_max_s"]
+                lo, hi = _clip_limits(shots, i, cons)
                 if delta > 0:
                     caps.append(max(0.0, min(hi - s["duration"], _room_after(s, sources, cat_idx, shots))))
                 else:
