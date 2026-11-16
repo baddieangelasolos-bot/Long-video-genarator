@@ -115,7 +115,14 @@ def main():
         if bad: raise M.StageFail('cut scan failed for '+', '.join(s for s,_ in bad),'\n'.join(t for _,t in bad))
     def plan_master():
         info=json.load(open(WORK+'/analysis/src_info.json')); env={'ROWS_ONLY':'1'}
-        for s in S['srcs']: py(PIPE+'/shots.py',s,info[s]['fps'],info[s]['dur'],2.6,cwd=PIPE,env=env)
+        try:      # footage that exists twice (two files, or twice in one) is used once
+            o=py(ROOT+'/scripts/dup_scan.py','--src-dir',SRC,'--out',WORK+'/analysis/dup_ranges.json','--sources',*S['srcs'],cwd=ROOT,timeout=1800)
+            mm=re.search(r'DUPS (\{.*\})',o)
+            if mm:
+                S['dup_stats']=json.loads(mm.group(1)); m.log('duplicate scan: '+mm.group(1))
+                if S['dup_stats'].get('ranges'): m.notices.append(f"repeated footage found: {S['dup_stats']['ranges']} stretch(es), {S['dup_stats']['seconds']}s in {', '.join(S['dup_stats']['files'])}; excluded so nothing shows twice")
+        except M.StageFail as e: m.notices.append('duplicate scan failed (repeated clips are not checked this run): '+str(e)[:100])
+        for s in S['srcs']: py(PIPE+'/shots.py',s,info[s]['fps'],info[s]['dur'],1.4,cwd=PIPE,env=env)
         py(PIPE+'/shots2.py',*S['srcs'],cwd=PIPE,timeout=3000)
         try: out=py(ROOT+'/scripts/classify_shots.py','--template',TPL,'--shots-dir',WORK+'/shots','--out',WORK+'/analysis/shot_catalog.json','--sources',*S['srcs'],cwd=ROOT,timeout=3000)
         except M.StageFail as e: m.notices.append('shot labelling failed, planner runs without labels (scene choice is content-blind): '+str(e)[:120]); return
@@ -130,6 +137,7 @@ def main():
         def run_planner(use_cat):
             args=[sys.executable,ROOT+'/scripts/script_planner.py','--template',TPL,'--sources-dir',SRC,'--music',SRC+'/music.m4a','--out',tl]
             if use_cat: args+=['--catalog',cat]
+            if os.path.exists(WORK+'/analysis/dup_ranges.json'): args+=['--dups',WORK+'/analysis/dup_ranges.json']
             m.run_cmd(args,cwd=ROOT,timeout=1800)
         def more_source(e): return M.Halt('NEEDS MORE SOURCE VIDEO. '+e.tail[-900:]+' WHAT TO DO: upload more clips to the source video folder in Drive, then run the workflow again.')
         if not has_cat: m.notices.append('no shot labels: planner is content-blind (structure and pacing follow the template, scene choice does not)')
@@ -147,6 +155,13 @@ def main():
             else: raise
         pl=json.load(open(tl)); S['final_len']=float(pl['target_duration_s']); S['planner']=(pl.get('_planner') or {}).get('planner','?'); S['known']=False
         m.log(f"master plan: {len(pl['timeline'])} shots, {S['final_len']} s, planner={S['planner']}")
+        try:      # footage and plan report: what was wanted, found, used and missing (mailed now, repeated in the final mail)
+            sys.path.insert(0,ROOT+'/scripts'); import plan_report as PR
+            rep=pl.get('_report') or {}; S['report_text']=PR.text(rep,S.get('cat_stats'),S.get('dup_stats'))
+            m.notices+=[x for x in rep.get('shortages',[])]
+            m.log('plan report: '+S['report_text'].replace('\n',' | ')[:900])
+            m.notify('notice','[Video pipeline] Footage and plan report',S['report_text'])
+        except Exception as e: m.log(f'plan report skipped: {type(e).__name__}: {e}')
     def outname():
         base=re.sub(r'[^A-Za-z0-9_]+','_',S['player'].title()).strip('_') or 'Video'; return f"{BUILD}/{base}.mp4" if base=='Highlights' else f"{BUILD}/{base}_Highlights.mp4"
     def stream(cmd,cwd,timeout):
@@ -228,7 +243,7 @@ def main():
                            ('qa',qa,{'retries':1}),('verify_output',verify_output,{'retries':0}),('export',export,{'optional':True,'retries':0}))
         for name,fn,kw in (master if MASTER else old):
             m.stage(name,fn,**kw)
-        sty=S.get('style') or {}; extra=f"Video: {S['out']}\nSources: {len(S['srcs'])} | title: {S['player']} / {S['club'] or '-'} ({S['identity']}) | style: {sty.get('source','?')} - {str(sty.get('describe',''))[:160]}\nPlayer: {S['player']} / {S['club']} | plan: {'known-good (reproduced)' if S['known'] else ('master template ('+S.get('planner','?')+')' if MASTER else 'AI/heuristic planner')} | final length {S['final_len']} s"
+        sty=S.get('style') or {}; extra=f"Video: {S['out']}\nSources: {len(S['srcs'])} | title: {S['player']} / {S['club'] or '-'} ({S['identity']}) | style: {sty.get('source','?')} - {str(sty.get('describe',''))[:160]}\n{S.get('report_text','')}\nPlayer: {S['player']} / {S['club']} | plan: {'known-good (reproduced)' if S['known'] else ('master template ('+S.get('planner','?')+')' if MASTER else 'AI/heuristic planner')} | final length {S['final_len']} s"
         status='SUCCESS' if not m.unsolved else 'SUCCESS WITH WARNINGS'; m.notify('success',f'[Video pipeline] {status}',m.summary_text(status,extra))
         sg=m.suggest(extra=S.get('sug',[]))
         try:
