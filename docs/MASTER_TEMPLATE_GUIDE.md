@@ -7,6 +7,7 @@
 | `scripts/timeline_core.py` | The sandbox: probes media, computes section budgets, validates, repairs. Shared by planner and renderer. |
 | `scripts/script_planner.py` | Gemini fills the timeline (10-model chain). Every answer is repaired + validated. Offline planner if all fail. |
 | `scripts/classify_shots.py` | Gemini labels the pipeline's contact-sheet rows with the template's shot types and writes `analysis/shot_catalog.json`. |
+| `scripts/comp_rules.py`, `catalog_tools.py`, `dup_scan.py`, `offline_planner.py`, `plan_report.py` | v3: composition rules, balanced prompt sample, repeated-footage scan, no-AI planner, footage and plan report mail. |
 | `scripts/render_video.py` | Validates again, renders 1920x1080 / 60 fps / CRF 18 / slow, optional beat snap, verifies the MP4. |
 
 ## Run locally
@@ -17,7 +18,9 @@ python scripts/script_planner.py --sources-dir work/src --music work/music.m4a \
        [--catalog work/shot_catalog.json] --out work/timeline.json
 python scripts/render_video.py  --sources-dir work/src --music work/music.m4a \
        --timeline work/timeline.json --out work/final.mp4 [--beat-snap] [--no-letterbox]
-python -m unittest discover -s tests -v     # 39 tests, Gemini mocked
+python -m unittest discover -s tests -p test_pipeline.py        # 39 tests, Gemini mocked (needs librosa for the beat-snap test)
+python -m unittest discover -s tests -p test_repair_regression.py   # 5
+python -m unittest discover -s tests -p test_v3_rules.py            # 14
 ```
 Exit codes (both scripts): `0` ok, `2` setup/input error, `3` needs more source video (planner), `4` no valid plan / render failed.
 
@@ -39,8 +42,18 @@ prepare > fetch > inventory > identify > scan > plan > master_plan > master_rend
 
 ## Shot catalog
 Without labels the planner is **content-blind**: structure and pacing follow the template but scene choice is random.
-`classify_shots.py` writes `[{"source_video_file","start","end","shot_type","quality"}]` (quality 3 or better, contiguous
+`classify_shots.py` writes `[{"source_video_file","start","end","shot_type","quality"}]` (quality 2 or better since v3, contiguous
 same-type rows merged). If Gemini is unreachable the run continues content-blind and the mail says so.
 
 ## Security
 Read-only token, `GEMINI_API_KEY` only in the pipeline step, owner-only job, public repo never uploads the MP4 or raw logs.
+
+## v3 rules (skills lead, intro scenes, celebration after goals, no repeats, report)
+- **Skills lead main**: `skill_types` (close_skill, semi_close, duel_1v1, run_making, ball_receive_pass, good_pass_chance) must fill at least `skill_share_min_of_main` = 0.5 of main (target about 65 percent). Goals never fill main. Checked by `comp_rules` (C-SKILL); an error for Gemini plans only when the footage allows it, a warning for the offline planner.
+- **Intro scenes**: `intro_scene_types` (bus_arrival, player_exit_bus_or_tunnel, dressing_room) are used before fans, celebration or training; the intro opens with the bus when bus footage exists (C-INTRO). Quality 2 (phone footage) is accepted for these.
+- **Celebration in main**: allowed only directly after its goal or penalty_goal, same source, within 25 s, 1.2 to 3.0 s, at most one per goal (E-CELEB). Repair drops any other main-part celebration. A goal with no celebration after it gets none.
+- **Goals** are built from 2 to 3 short parts in order from one segment, then the optional celebration (M15).
+- **No repeated footage** (G7, E-DUP): `dup_scan.py` compares 256-bit frame hashes (2 per second, written by `fullscan.py` as `hash_<src>.npz`) across and inside files. The first copy is kept; later copies go to `analysis/dup_ranges.json` and are cut out of the catalog. Thresholds: `MAX_BITS`, `MIN_RUN`, `SAME_FILE_GAP_S` in `scripts/dup_scan.py`. If the scan fails the run continues and a notice says repeats were not checked.
+- **Overlap check** compares each window with the furthest end so far, so a long window that swallows two later ones is caught (E-OVERLAP).
+- **Catalog changes**: quality floor 2 on the command line, shots from 1.4 s (was 2.6 s), sharper labelling guide. The prompt sample is balanced round-robin over shot types (up to 360 lines) and carries SUPPLY and MUST lines.
+- **Report (G8)**: `plan_report.py` writes the mail "[Video pipeline] Footage and plan report" (footage by type, labelling stats, repeated footage, what each section used, main mix, MISSING / SHORT lines) and the same text goes into the final mail and the notices.
