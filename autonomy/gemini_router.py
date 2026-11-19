@@ -55,8 +55,15 @@ def _call(model,prompt,images,json_mode,timeout,extra_parts=()):
     if json_mode:
         t=txt.strip(); t=re.sub(r'^```(?:json)?|```$','',t,flags=re.M).strip(); json.loads(t); txt=t
     return txt
+def wait_hint(role='vision'):
+    """Seconds until the first tier of this role leaves its cooldown (0 = one is ready now, None = no tiers at all)."""
+    tiers=rank(discover(),role)
+    if not tiers: return None
+    now=time.time(); return max(0.0,min(_cool.get(m,0)-now for m in tiers))
 def ask(role,prompt,images=(),json_mode=False,timeout=120,extra_parts=()):
-    ids=discover(); tiers=rank(ids,role)
+    ids=discover()
+    if not ids and key(): ids=discover(True)      # a failed model listing is cached as empty: look once more before giving up
+    tiers=rank(ids,role)
     if not tiers: return None,None
     for i,m in enumerate(tiers):
         if _cool.get(m,0)>time.time(): continue

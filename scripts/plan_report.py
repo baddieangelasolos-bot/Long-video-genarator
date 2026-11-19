@@ -65,7 +65,13 @@ def build(ctx: dict, timeline: list[dict], planner: str) -> dict:
 
 
 def text(rep: dict, cat_stats: dict | None = None, dups: dict | None = None) -> str:
-    L = [f"FOOTAGE FOUND (seconds by type): {_fmt(rep['supply_s'])}"]
+    L = []
+    rows = (cat_stats or {}).get("rows", 0)
+    mostly_blind = not rep["supply_s"] or (rows and (cat_stats or {}).get("labelled", 0) < 0.5 * rows)
+    if mostly_blind:
+        L.append("WARNING: shot labelling failed (see Labelling below). The USED lines show the types the planner ASSIGNED, "
+                 "not checked footage: scenes are effectively random. Run again later for a properly labelled video.")
+    L.append(f"FOOTAGE FOUND (seconds by type): {_fmt(rep['supply_s'])}")
     if cat_stats:
         L.append(f"Labelling: {cat_stats.get('labelled', 0)} of {cat_stats.get('rows', 0)} windows labelled; "
                  f"{cat_stats.get('rejected_rows', 0)} rejected as unusable, {cat_stats.get('too_low_quality_rows', 0)} too poor in quality.")
@@ -73,7 +79,8 @@ def text(rep: dict, cat_stats: dict | None = None, dups: dict | None = None) -> 
         L.append(f"Repeated footage: {dups.get('ranges', 0)} repeated stretch(es), {dups.get('seconds', 0)}s, excluded so nothing shows twice.")
     for sec in ("intro", "main", "outro"):
         u = rep["used"].get(sec, {})
-        L.append(f"{sec.upper()} USED ({rep['budgets_s'].get(sec, 0):.0f}s): " + (", ".join(f"{t} x{v[0]} ({v[1]:.0f}s)" for t, v in u.items()) or "nothing"))
+        L.append(f"{sec.upper()} USED ({rep['budgets_s'].get(sec, 0):.0f}s){' [unverified]' if mostly_blind else ''}: "
+                 + (", ".join(f"{t} x{v[0]} ({v[1]:.0f}s)" for t, v in u.items()) or "nothing"))
     L.append(rep["plan_line"])
     L += ["MISSING / SHORT: " + x for x in rep["shortages"]] or []
     if not rep["shortages"]:

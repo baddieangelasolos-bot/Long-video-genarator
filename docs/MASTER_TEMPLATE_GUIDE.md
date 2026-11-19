@@ -57,3 +57,10 @@ Read-only token, `GEMINI_API_KEY` only in the pipeline step, owner-only job, pub
 - **Overlap check** compares each window with the furthest end so far, so a long window that swallows two later ones is caught (E-OVERLAP).
 - **Catalog changes**: quality floor 2 on the command line, shots from 1.4 s (was 2.6 s), sharper labelling guide. The prompt sample is balanced round-robin over shot types (up to 360 lines) and carries SUPPLY and MUST lines.
 - **Report (G8)**: `plan_report.py` writes the mail "[Video pipeline] Footage and plan report" (footage by type, labelling stats, repeated footage, what each section used, main mix, MISSING / SHORT lines) and the same text goes into the final mail and the notices.
+
+## v3.1 (labelling that survives a busy Gemini, honest mails)
+- **Why**: a run labelled 0 of 197 windows (Gemini quota or busy) and still mailed SUCCESS with random scenes. The router cools a failing model for 1 to 15 minutes, so one busy spell could leave every remaining sheet without an answer.
+- `classify_shots.py` now asks again for unanswered sheets after a wait (up to 5 rounds, 30 to 240 s, based on `gemini_router.wait_hint()`), counts why sheets failed (`fail_reasons`) and adds the router events of its own process (`ai_events`) to the CATALOG line. `gemini_router.ask` retries a failed model listing once.
+- `label_health.py` judges the result: 0 labels or under 50 percent labelled = unsolved problem (mail status SUCCESS WITH WARNINGS), under 90 percent = notice. It also turns the footage report (shortages, repeated footage) into suggestions, so the "Suggestions after this run" mail is no longer empty in the master path.
+- `plan_report.py` starts with a WARNING and marks the USED lines `[unverified]` when labelling failed.
+- Test: `python -m unittest discover -s tests -p test_v31_labelling.py` (16).
