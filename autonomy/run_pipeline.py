@@ -124,12 +124,18 @@ def main():
         except M.StageFail as e: m.notices.append('duplicate scan failed (repeated clips are not checked this run): '+str(e)[:100])
         for s in S['srcs']: py(PIPE+'/shots.py',s,info[s]['fps'],info[s]['dur'],1.4,cwd=PIPE,env=env)
         py(PIPE+'/shots2.py',*S['srcs'],cwd=PIPE,timeout=3000)
-        try: out=py(ROOT+'/scripts/classify_shots.py','--template',TPL,'--shots-dir',WORK+'/shots','--out',WORK+'/analysis/shot_catalog.json','--sources',*S['srcs'],cwd=ROOT,timeout=3000)
-        except M.StageFail as e: m.notices.append('shot labelling failed, planner runs without labels (scene choice is content-blind): '+str(e)[:120]); return
+        def health(st,crashed=False):      # notices, unsolved problems and suggestions from the labelling result (scripts/label_health.py)
+            try:
+                sys.path.insert(0,ROOT+'/scripts'); import label_health as LH
+                h=LH.assess(st,crashed); m.notices+=h['notices']; m.unsolved+=h['unsolved']; S.setdefault('sug',[]).extend(h['suggestions'])
+                if G is not None:      # router events happened in the labelling subprocess: show them in the mail too
+                    for e in (st or {}).get('ai_events',[]): G.EVENTS.append('labelling: '+e)
+            except Exception as e: m.log(f'label health check skipped: {type(e).__name__}: {e}')
+        try: out=py(ROOT+'/scripts/classify_shots.py','--template',TPL,'--shots-dir',WORK+'/shots','--out',WORK+'/analysis/shot_catalog.json','--sources',*S['srcs'],cwd=ROOT,timeout=4500)
+        except M.StageFail as e: m.notices.append('shot labelling failed, planner runs without labels (scene choice is content-blind): '+str(e)[:120]); health(None,True); return
         mm=re.search(r'CATALOG (\{.*\})',out)
         if mm:
-            st=json.loads(mm.group(1)); S['cat_stats']=st; m.log('shot catalog: '+mm.group(1))
-            if not st.get('segments'): m.notices.append('Gemini labelled no shots: planner runs without labels (scene choice is content-blind)')
+            st=json.loads(mm.group(1)); S['cat_stats']=st; m.log('shot catalog: '+mm.group(1)); health(st)
     def master_plan():
         cat=WORK+'/analysis/shot_catalog.json'; tl=BUILD+'/timeline.json'; os.makedirs(BUILD,exist_ok=True)
         try: has_cat=bool(os.path.exists(cat) and json.load(open(cat)))
@@ -159,6 +165,9 @@ def main():
             sys.path.insert(0,ROOT+'/scripts'); import plan_report as PR
             rep=pl.get('_report') or {}; S['report_text']=PR.text(rep,S.get('cat_stats'),S.get('dup_stats'))
             m.notices+=[x for x in rep.get('shortages',[])]
+            try:
+                import label_health as LH; S.setdefault('sug',[]).extend(LH.report_suggestions(rep,S.get('dup_stats')))
+            except Exception as e: m.log(f'report suggestions skipped: {type(e).__name__}: {e}')
             m.log('plan report: '+S['report_text'].replace('\n',' | ')[:900])
             m.notify('notice','[Video pipeline] Footage and plan report',S['report_text'])
         except Exception as e: m.log(f'plan report skipped: {type(e).__name__}: {e}')
