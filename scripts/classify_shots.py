@@ -21,6 +21,8 @@ import json
 import logging
 import re
 import sys
+import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
@@ -106,17 +108,23 @@ def parse_answer(text: str | None, ids: list[str], types: set[str]) -> dict[str,
     return out
 
 
-def classify_sheet(ask: Callable[..., Any], sheet: Path, ids: list[str], types: list[str]) -> dict[str, tuple[str, int]]:
+def classify_sheet(ask: Callable[..., Any], sheet: Path, ids: list[str], types: list[str],
+                   why: list[str] | None = None) -> dict[str, tuple[str, int]]:
+    """Ask for one sheet (2 attempts). `why` collects a short reason for every failed attempt."""
     prompt = build_prompt(ids, types)
     for attempt in (1, 2):
         try:
             text, model = ask("vision", prompt, images=[str(sheet)], json_mode=True, timeout=120)
         except Exception as exc:  # never let one sheet kill the run
             log.warning("sheet %s attempt %d failed: %s", sheet.name, attempt, type(exc).__name__)
+            if why is not None:
+                why.append(type(exc).__name__)
             continue
         got = parse_answer(text, ids, set(types))
         if got:
             return got
+        if why is not None:
+            why.append("all_models_failed" if text is None else "unusable_answer")
         log.warning("sheet %s attempt %d: no usable answer", sheet.name, attempt)
     return {}
 
@@ -143,7 +151,11 @@ def merge_rows(rows: list[dict], labels: dict[str, tuple[str, int]], min_quality
 
 
 def run(shots_dir: Path, srcs: list[str], template: dict, ask: Callable[..., Any],
-        min_quality: int = 3, workers: int = 3) -> tuple[list[dict], dict]:
+        min_quality: int = 3, workers: int = 3, retry_rounds: int = 0,
+        sleep: Callable[[float], Any] | None = None,
+        wait_hint: Callable[[], float | None] | None = None) -> tuple[list[dict], dict]:
+    """Label every sheet. Sheets that got (almost) no answer are asked again after a wait, up to `retry_rounds`
+    times, so a short Gemini quota or busy spell does not leave the whole catalog empty."""
     types = taxonomy(template)
     jobs, all_rows = [], []
     for src in srcs:
@@ -161,9 +173,32 @@ def run(shots_dir: Path, srcs: list[str], template: dict, ask: Callable[..., Any
             else:
                 log.warning("missing sheet %s", sheet.name)
     labels: dict[str, tuple[str, int]] = {}
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-        for res in ex.map(lambda j: classify_sheet(ask, j[0], j[1], types), jobs):
-            labels.update(res)
+    why: list[str] = []
+    got_by_sheet: dict[Path, int] = {}
+
+    def weak(j: tuple[Path, list[str]]) -> bool:
+        return got_by_sheet.get(j[0], 0) < max(1, len(j[1]) // 2)
+
+    def label_jobs(todo: list, nworkers: int) -> None:
+        with ThreadPoolExecutor(max_workers=max(1, nworkers)) as ex:
+            for j, res in zip(todo, ex.map(lambda j: classify_sheet(ask, j[0], j[1], types, why), todo)):
+                if len(res) > got_by_sheet.get(j[0], 0):
+                    got_by_sheet[j[0]] = len(res)
+                    labels.update(res)
+
+    label_jobs(jobs, workers)
+    pending = [j for j in jobs if weak(j)]
+    rounds_used = 0
+    while pending and rounds_used < retry_rounds:
+        hint = wait_hint() if wait_hint else 0.0
+        if hint is None:          # no AI tier exists at all (no key, blocked): waiting cannot help
+            break
+        rounds_used += 1
+        wait = min(240.0, max(30.0, hint + 5.0))      # long enough to outlast a 15 min circuit-breaker cooldown over a few rounds
+        log.warning("%d sheet(s) unanswered: waiting %.0fs, retry round %d/%d", len(pending), wait, rounds_used, retry_rounds)
+        (sleep or time.sleep)(wait)
+        label_jobs(pending, min(2, workers))
+        pending = [j for j in jobs if weak(j)]
     segs = merge_rows(all_rows, labels, min_quality)
     seconds: dict[str, float] = {}
     for s in segs:
@@ -173,21 +208,34 @@ def run(shots_dir: Path, srcs: list[str], template: dict, ask: Callable[..., Any
     row_s = round(sum(r["e"] - r["s"] for r in all_rows), 1)
     stats = {"rows": len(all_rows), "labelled": len(labels), "sheets": len(jobs), "segments": len(segs),
              "rejected_rows": rejected, "too_low_quality_rows": lowq, "row_seconds": row_s,
-             "seconds_by_type": dict(sorted(seconds.items()))}
+             "seconds_by_type": dict(sorted(seconds.items())),
+             "sheets_unanswered": len(pending), "retry_rounds": rounds_used, "fail_reasons": dict(Counter(why))}
     return segs, stats
 
 
-def _router_ask() -> Callable[..., Any] | None:
+def _router_module() -> Any:
     sys.path.insert(0, str(HERE.parent / "autonomy"))
     try:
         import gemini_router as G  # type: ignore
-        return G.ask
+        return G
     except Exception as exc:  # noqa: BLE001
         log.warning("gemini_router unavailable (%s)", type(exc).__name__)
         return None
 
 
-def main(argv: list[str] | None = None, ask: Callable[..., Any] | None = None) -> int:
+def _router_ask() -> Callable[..., Any] | None:
+    G = _router_module()
+    return G.ask if G else None
+
+
+def event_summary(events: list[str], top: int = 8) -> list[str]:
+    """Router events without their time stamp, counted: '14 x model: quota/rate limit (429) -> next tier'."""
+    c = Counter(re.sub(r"^\d\d:\d\d:\d\d ", "", e)[:110] for e in events)
+    return [f"{n} x {msg}" for msg, n in c.most_common(top)]
+
+
+def main(argv: list[str] | None = None, ask: Callable[..., Any] | None = None,
+         sleep: Callable[[float], Any] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--template", default="config/master_rendering_template.json")
     ap.add_argument("--shots-dir", default="/home/claude/work/shots")
@@ -195,6 +243,7 @@ def main(argv: list[str] | None = None, ask: Callable[..., Any] | None = None) -
     ap.add_argument("--out", default="/home/claude/work/analysis/shot_catalog.json")
     ap.add_argument("--min-quality", type=int, default=2)
     ap.add_argument("--workers", type=int, default=3)
+    ap.add_argument("--retry-rounds", type=int, default=5, help="waits and asks again for unanswered sheets (router only)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
     try:
@@ -202,12 +251,19 @@ def main(argv: list[str] | None = None, ask: Callable[..., Any] | None = None) -
     except core.PlanError as exc:
         log.error("%s", exc)
         return 2
-    ask = ask or _router_ask()
+    G = None
+    if ask is None:
+        G = _router_module()
+        ask = G.ask if G else None
+    rounds = args.retry_rounds if (G is not None or sleep is not None) else 0      # an injected asker (tests) never waits unless it brings its own sleep
     if ask is None:
         segs, stats = [], {"rows": 0, "labelled": 0, "sheets": 0, "segments": 0, "seconds_by_type": {}}
         log.warning("No AI available: writing an EMPTY catalog (planner will be content-blind)")
     else:
-        segs, stats = run(Path(args.shots_dir), args.sources, tpl, ask, args.min_quality, args.workers)   # CLI default is 2 (phone-quality intro scenes count)
+        segs, stats = run(Path(args.shots_dir), args.sources, tpl, ask, args.min_quality, args.workers,   # CLI default is 2 (phone-quality intro scenes count)
+                          retry_rounds=rounds, sleep=sleep, wait_hint=getattr(G, "wait_hint", None))
+        if G is not None and getattr(G, "EVENTS", None):
+            stats["ai_events"] = event_summary(list(G.EVENTS))
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(segs, indent=1), encoding="utf-8")
     print("CATALOG " + json.dumps(stats), flush=True)
