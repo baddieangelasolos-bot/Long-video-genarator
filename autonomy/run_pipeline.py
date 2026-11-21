@@ -8,6 +8,9 @@ except Exception: G=None
 HERE,WORK,PIPE,BUILD=M.HERE,M.WORK,M.PIPE,M.BUILD; SRC=os.environ.get('SRC_DIR',WORK+'/src')
 ROOT=os.path.dirname(HERE); TPL=ROOT+'/config/master_rendering_template.json'
 MASTER=os.environ.get('MASTER_RENDER','1')!='0' and os.path.exists(TPL)   # master-template path (planner+renderer); MASTER_RENDER=0 restores the old path
+class BrainUnavailable(M.Halt):      # v4 brain rule: the 3 planning models cannot plan -> stop and mail when to run again (no low-quality video)
+    def __init__(s,text,when): super().__init__('Gemini brain unavailable'); s.text=text; s.when=when
+BRAINF=WORK+'/analysis/brain_unavailable.json'     # written by scripts/script_planner.py --strict-brain (exit 5)
 def ff(path,entries='format=duration:stream=r_frame_rate,width,height'):
     r=subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries',entries,'-of','json',path],capture_output=True,text=True); return json.loads(r.stdout)
 def _guard(self,where=''):
@@ -141,20 +144,29 @@ def main():
         try: has_cat=bool(os.path.exists(cat) and json.load(open(cat)))
         except Exception: has_cat=False
         def run_planner(use_cat):
-            args=[sys.executable,ROOT+'/scripts/script_planner.py','--template',TPL,'--sources-dir',SRC,'--music',SRC+'/music.m4a','--out',tl]
+            args=[sys.executable,ROOT+'/scripts/script_planner.py','--template',TPL,'--sources-dir',SRC,'--music',SRC+'/music.m4a','--out',tl,'--brain-report',BRAINF]
+            if os.environ.get('ALLOW_OFFLINE_PLANNER')!='1': args.append('--strict-brain')      # owner rule: no brain, no video (3 planning models only)
             if use_cat: args+=['--catalog',cat]
             if os.path.exists(WORK+'/analysis/dup_ranges.json'): args+=['--dups',WORK+'/analysis/dup_ranges.json']
             m.run_cmd(args,cwd=ROOT,timeout=1800)
         def more_source(e): return M.Halt('NEEDS MORE SOURCE VIDEO. '+e.tail[-900:]+' WHAT TO DO: upload more clips to the source video folder in Drive, then run the workflow again.')
+        try: os.remove(BRAINF)
+        except OSError: pass
+        def brain_stop(e):      # exit 5 from script_planner: stop here, the mail says which model failed and when to run again
+            try: info=json.load(open(BRAINF))
+            except Exception: info={}
+            return BrainUnavailable(info.get('text') or ('THE GEMINI BRAIN IS UNAVAILABLE (no details were written): '+e.tail[-700:]),info.get('subject_when') or 'see the mail')
         if not has_cat: m.notices.append('no shot labels: planner is content-blind (structure and pacing follow the template, scene choice does not)')
         try: run_planner(has_cat)
         except M.StageFail as e:
+            if e.rc==5: raise brain_stop(e)
             if e.rc not in (3,4): raise
             st=S.get('cat_stats') or {}
             if has_cat and st.get('rows') and st.get('labelled',0)<0.9*st['rows']:      # Gemini was busy: do not blame the footage
                 m.notices.append(f"Gemini labelled only {st.get('labelled',0)} of {st['rows']} shots (busy or quota): this plan is content-blind. Run again later for a labelled plan.")
                 try: run_planner(False)
                 except M.StageFail as e2:
+                    if e2.rc==5: raise brain_stop(e2)
                     if e2.rc==3: raise more_source(e2)
                     raise
             elif e.rc==3: raise more_source(e)
@@ -261,6 +273,9 @@ def main():
         except Exception: pass
         m.notify('notice','[Video pipeline] Suggestions after this run (nothing applied)','\n'.join(' - '+x for x in sg) if sg else 'No suggestions this run.')
         return 0
+    except BrainUnavailable as e:
+        m.unsolved.append('Gemini brain unavailable: no video was planned (the mail says when to run again)')
+        m.notify('failure','[Video pipeline] HALTED: Gemini brain unavailable - run again after '+e.when,e.text+'\n\nSTAGE TIMINGS:\n'+'\n'.join(f" - {x['name']}: {x['seconds']}s, {'ok' if x['ok'] else 'FAILED'}" for x in m.stages)); return 1
     except M.Halt as e:
         m.notify('failure','[Video pipeline] HALTED: needs you',m.summary_text('HALTED',f'Reason: {e}')); return 1
     except Exception as e:
