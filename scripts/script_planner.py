@@ -3,7 +3,8 @@
 script_planner.py - source clips + music + master template -> a verified timeline.json.
 Gemini (google-genai, 10-model chain, JSON-only output) proposes; timeline_core repairs and validates every answer;
 if every model fails a deterministic offline planner builds the timeline.
-Exit codes: 0 ok | 2 setup/usage error | 3 NEEDS MORE SOURCE VIDEO | 4 no valid plan could be made
+Exit codes: 0 ok | 2 setup/usage error | 3 NEEDS MORE SOURCE VIDEO | 4 no valid plan could be made |
+            5 BRAIN UNAVAILABLE (only with --strict-brain: the 3 brain models could not plan; no offline video is made, a halt report is written)
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import brain_guard as bg  # noqa: E402
 import catalog_tools as ct  # noqa: E402
 import plan_report  # noqa: E402
 import timeline_core as core  # noqa: E402
@@ -37,6 +39,10 @@ MODEL_FALLBACK_CHAIN = [
     "gemini-2.5-flash-preview",
     "gemini-2.0-flash-lite",
 ]
+# v4 brain rule: the video script/plan is made ONLY by the first 3 models of the chain (primary + 2 fallbacks). The full chain stays
+# defined (same order) for reference and tests; identify/labelling use their own router chains and are not affected.
+BRAIN_MODELS = MODEL_FALLBACK_CHAIN[:bg.BRAIN_SIZE]
+EXIT_BRAIN_UNAVAILABLE = 5   # strict mode: none of the brain models could plan; nothing was written but the halt report
 REQUEST_TIMEOUT_S = 75     # per request; a hanging model must not eat the whole run
 MAX_CATALOG_LINES = 360    # keeps the prompt small enough for lite models; the sample keeps every type and source (balanced_sample)
 
@@ -220,10 +226,14 @@ def parse_json(text: str) -> dict:
 
 def plan_with_gemini(ctx: dict, client: Any, models: list[str], max_repairs: int = 1,
                      caller: Callable[[Any, str, str, str], str] = call_gemini,
-                     sleep: Callable[[float], None] = time.sleep) -> tuple[dict | None, dict]:
+                     sleep: Callable[[float], None] = time.sleep,
+                     clock: Callable[[], Any] = bg.utcnow) -> tuple[dict | None, dict]:
     """
-    Walk the fallback chain. Per model: ask once; if the answer fails validation, ask once more
-    with the error list (max_repairs). Returns (plan or None, report).
+    Walk the given models in order. Per model: ask once; if the answer fails validation, ask once more
+    with the error list (max_repairs). Models that failed for busy/quota reasons get up to two more passes
+    (after 20 s, then 60 s; longer if Google's own retry hint says so). A model whose DAILY quota is used up is not asked again.
+    Returns (plan or None, report). Every failed attempt in report["attempts"] carries http, message, state and, when known,
+    the time the model should be usable again (see brain_guard.describe_error).
     """
     report: dict[str, Any] = {"attempts": [], "model_used": None}
     available = discover_models(client) if client is not None else None
@@ -236,9 +246,11 @@ def plan_with_gemini(ctx: dict, client: Any, models: list[str], max_repairs: int
         log.warning("None of the chain models is served for this key")
         return None, report
 
-    for pass_no in (1, 2):  # a second pass only retries models that failed for transient reasons
+    todo = list(chain)
+    for pass_no in (1, 2, 3):
         retry_later: list[str] = []
-        for model in (chain if pass_no == 1 else report.get("_retry", [])):
+        pass_attempts: list[dict] = []
+        for model in todo:
             errors: list[str] | None = None
             previous: str | None = None
             for attempt in range(1 + max_repairs):
@@ -248,10 +260,13 @@ def plan_with_gemini(ctx: dict, client: Any, models: list[str], max_repairs: int
                     raw = caller(client, model, system, prompt)
                 except Exception as exc:  # noqa: BLE001 - classified below, never swallowed silently
                     kind = classify_error(exc)
+                    info = bg.describe_error(kind, exc, clock())
                     log.warning("%s -> %s (%s: %s) in %.1fs", model, kind, type(exc).__name__,
-                                str(exc)[:120], time.time() - t0)
-                    report["attempts"].append({"model": model, "result": kind})
-                    if kind in ("quota", "transient"):
+                                bg.scrub(str(exc))[:120], time.time() - t0)
+                    rec = {"model": model, "result": kind, **info}
+                    report["attempts"].append(rec)
+                    pass_attempts.append(rec)
+                    if kind in ("quota", "transient") and info.get("state") != "quota_daily":
                         retry_later.append(model)
                         sleep(1.0)
                     break  # next model
@@ -268,18 +283,16 @@ def plan_with_gemini(ctx: dict, client: Any, models: list[str], max_repairs: int
                              model, len(fixed["timeline"]), len(notes), len(warns))
                     report.update(model_used=model, repairs=notes, warnings=warns)
                     report["attempts"].append({"model": model, "result": "ok"})
-                    report.pop("_retry", None)
                     return fixed, report
                 log.warning("%s answer rejected: %d errors, e.g. %s", model, len(errs), errs[0])
                 report["attempts"].append({"model": model, "result": "invalid", "errors": errs[:5]})
                 errors, previous = errs, json.dumps(fixed)
-        report["_retry"] = [m for m in dict.fromkeys(retry_later)]
-        if pass_no == 1 and report["_retry"]:
-            log.info("Waiting 20 s, then retrying %d busy model(s) once", len(report["_retry"]))
-            sleep(20.0)
-        else:
+        todo = [m for m in dict.fromkeys(retry_later)]
+        if not todo or pass_no == 3:
             break
-    report.pop("_retry", None)
+        wait = bg.retry_wait(pass_attempts, pass_no + 1)
+        log.info("Waiting %.0f s, then retrying %d busy model(s) (pass %d of 3)", wait, len(todo), pass_no + 1)
+        sleep(wait)
     return None, report
 
 
@@ -300,12 +313,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--out", default="build/timeline.json")
     ap.add_argument("--no-ai", action="store_true", help="skip Gemini, use the offline planner only")
     ap.add_argument("--require-ai", action="store_true", help="fail (exit 4) instead of using the offline planner")
+    ap.add_argument("--strict-brain", action="store_true",
+                    help="owner rule: if none of the 3 brain models can plan, stop (exit 5) and write the halt report; never use the offline planner")
+    ap.add_argument("--brain-report", default=None, help="where --strict-brain writes brain_unavailable.json (default: next to --out)")
     ap.add_argument("--max-repairs", type=int, default=1, help="re-asks per model after a rejected answer")
     ap.add_argument("--exclude", nargs="*", default=list(core.DEFAULT_EXCLUDE),
                     help="file names in --sources-dir that are NOT footage (default: ref.mp4, the reference video)")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("-v", "--verbose", action="store_true")
     return ap.parse_args(argv)
+
+
+def brain_halt(args: argparse.Namespace, report: dict, key_missing: bool) -> int:
+    """Strict mode: write the halt report (who failed, when to run again) and return exit code 5. No video is planned."""
+    info = bg.summarize(report.get("attempts", []), BRAIN_MODELS, report.get("not_served", []), bg.utcnow(), key_missing=key_missing)
+    path = Path(args.brain_report) if args.brain_report else Path(args.out).with_name("brain_unavailable.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(info, indent=2), encoding="utf-8")
+    log.error("BRAIN UNAVAILABLE (%s): no video will be planned. Report: %s", info["reason"], path)
+    for line in info["text"].splitlines():
+        log.error("%s", line)
+    return EXIT_BRAIN_UNAVAILABLE
 
 
 def main(argv: list[str] | None = None, client_factory: Callable[[], Any] = make_client) -> int:
@@ -343,19 +371,23 @@ def main(argv: list[str] | None = None, client_factory: Callable[[], Any] = make
         return 3
 
     plan, report, planner_name = None, {}, "none"
+    key_missing = False
     if not args.no_ai:
         try:
             client = client_factory()
         except KeyError:
             log.warning("GEMINI_API_KEY is not set")
-            client = None
+            client, key_missing = None, True
         except Exception as exc:  # SDK import problems, bad key format, etc.
-            log.warning("Could not create the Gemini client (%s: %s)", type(exc).__name__, str(exc)[:120])
-            client = None
+            log.warning("Could not create the Gemini client (%s: %s)", type(exc).__name__, bg.scrub(str(exc))[:120])
+            client, key_missing = None, True
         if client is not None:
-            plan, report = plan_with_gemini(ctx, client, MODEL_FALLBACK_CHAIN, max_repairs=args.max_repairs)
+            log.info("Brain models (primary + 2 fallbacks): %s", ", ".join(BRAIN_MODELS))
+            plan, report = plan_with_gemini(ctx, client, BRAIN_MODELS, max_repairs=args.max_repairs, caller=call_gemini)
             if plan:
                 planner_name = f"gemini:{report['model_used']}"
+    if plan is None and args.strict_brain and not args.no_ai:
+        return brain_halt(args, report, key_missing)
     if plan is None:
         if args.require_ai:
             log.error("No Gemini model produced a valid plan and --require-ai is set")
@@ -371,7 +403,9 @@ def main(argv: list[str] | None = None, client_factory: Callable[[], Any] = make
             return 4
 
     out = {
-        "_planner": {"planner": planner_name, "model_chain_report": {k: v for k, v in report.items()
+        "_planner": {"planner": planner_name, "model_used": report.get("model_used"), "brain_models": list(BRAIN_MODELS),
+                     "slot": (BRAIN_MODELS.index(report["model_used"]) + 1) if report.get("model_used") in BRAIN_MODELS else None,
+                     "model_chain_report": {k: v for k, v in report.items()
                                                                         if k in ("attempts", "not_served", "repairs", "warnings")},
                      "notes": plan.pop("_notes", [])},
         "target_duration_s": target,
