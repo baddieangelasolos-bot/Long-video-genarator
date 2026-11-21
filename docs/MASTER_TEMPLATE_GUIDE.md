@@ -5,7 +5,8 @@
 |---|---|
 | `config/master_rendering_template.json` | Permanent rulebook + schema + measured pacing from the reference edit. The only place numbers live. |
 | `scripts/timeline_core.py` | The sandbox: probes media, computes section budgets, validates, repairs. Shared by planner and renderer. |
-| `scripts/script_planner.py` | Gemini fills the timeline (10-model chain). Every answer is repaired + validated. Offline planner if all fail. |
+| `scripts/script_planner.py` | Gemini fills the timeline. Planning uses ONLY the 3 brain models (first 3 of the 10-model chain). Every answer is repaired + validated. In the workflow (`--strict-brain`) there is no offline fallback: see v4. |
+| `scripts/brain_guard.py` | v4: reads Gemini errors, computes when a model is usable again, builds the BRAIN UNAVAILABLE report. |
 | `scripts/classify_shots.py` | Gemini labels the pipeline's contact-sheet rows with the template's shot types and writes `analysis/shot_catalog.json`. |
 | `scripts/comp_rules.py`, `catalog_tools.py`, `dup_scan.py`, `offline_planner.py`, `plan_report.py` | v3: composition rules, balanced prompt sample, repeated-footage scan, no-AI planner, footage and plan report mail. |
 | `scripts/render_video.py` | Validates again, renders 1920x1080 / 60 fps / CRF 18 / slow, optional beat snap, verifies the MP4. |
@@ -30,7 +31,7 @@ The master path is ON by default when `config/master_rendering_template.json` ex
 prepare > fetch > inventory > identify > scan > plan > master_plan > master_render > qa > verify_output > export
 ```
 - `plan`: `shots.py` + `shots2.py` (cuts and contact sheets), then `classify_shots.py` (Gemini labels, repo router with real model ids).
-- `master_plan`: `script_planner.py` (10-model chain, validated, offline fallback). Exit 3 becomes a HALTED mail "NEEDS MORE SOURCE VIDEO".
+- `master_plan`: `script_planner.py --strict-brain` (3 brain models, validated, no offline fallback). Exit 3 becomes a HALTED mail "NEEDS MORE SOURCE VIDEO"; exit 5 becomes a HALTED mail "Gemini brain unavailable - run again after <time>" (v4).
 - `master_render`: `render_video.py --no-beats`, writes `build/<Player>_Highlights.mp4` and `pipeline/edl.json` (for `qa.py`); config fps is set to 60.
 - Skipped in master mode: beat grid, style, style_ai, known-good replay, edl, watermark, cards, grade, old render, assemble.
 - The old `_guard` min-clip / wide-share checks are replaced by the template validator (the owner template allows a 0.6 s opener).
@@ -65,3 +66,14 @@ Read-only token, `GEMINI_API_KEY` only in the pipeline step, owner-only job, pub
 - `plan_report.py` starts with a WARNING and marks the USED lines `[unverified]` when labelling failed.
 - Test: `python -m unittest discover -s tests -p test_v31_labelling.py` (16).
 - **Log mail after every run**: `autonomy/email_logs.py` (already the last workflow step, `if: always()`) now mails `pipeline-logs.zip` after every run, not only failures. Subject `[Video pipeline] Run logs attached (SUCCESS | SUCCESS WITH WARNINGS)` or `FAILED - logs attached`. The body lists the key lines (warnings, router failovers, labelling stats, plan report). The zip holds `build.log` (full output of every stage), `alerts.log` (every mail), `analysis/*.json`, `build/timeline.json`, the render report and `shots/*_rows.json`; secrets are replaced by `***`. Needs the `MAIL_USER` and `MAIL_APP_PASSWORD` secrets (the step prints "secrets missing" otherwise). `EMAIL_LOGS_ALWAYS=0` restores failures-only. Test: `tests/test_email_logs.py` (5).
+
+## v4 (brain rule: only the 3 best models plan, otherwise stop and wait)
+- **Owner rule**: the video script and plan are made only by `script_planner.BRAIN_MODELS` = the first 3 models of `MODEL_FALLBACK_CHAIN` (today `gemini-3.8-flash` primary, `gemini-3.6-flash`, `gemini-3.5-flash-lite`). The full 10-name chain and its order are unchanged and kept; identify and shot labelling keep their own router chains (`gemini_router.py`). The master template (`config/master_rendering_template.json`) and the prompt (`build_prompt`) were NOT changed.
+- **Patience before giving up**: a busy (5xx, timeout) or rate-limited (429) brain model gets up to 2 more passes, after 20 s then 60 s (longer, max 90 s, if Google's own retry hint says so). A model whose DAILY quota is used up is not asked again.
+- **If none of the 3 can plan** (quota, overload, not served for the key, no key): `script_planner.py --strict-brain` writes `analysis/brain_unavailable.json` and exits **5**. `run_pipeline.py` turns that into the HALTED mail `[Video pipeline] HALTED: Gemini brain unavailable - run again after <time>`. No offline video is made. `ALLOW_OFFLINE_PLANNER=1` in the runner environment restores the old offline fallback (the workflow file does not set it).
+- **The time in the mail is labelled honestly**: EXACT = Google's retry hint or the documented daily reset at midnight Pacific time (08:00 UTC in winter, 07:00 UTC in summer); SAFE = Google named no quota type (the daily reset is the safe time); SUGGESTION = overload (503, timeout) has no published end time, so about 30 minutes is only a suggestion. The mail shows UTC, Pacific time and a countdown.
+- **Log mail names the planner**: `email_logs.py` starts the body with a PLANNING BRAIN block (model that planned the video and its slot, the attempts before it, models not served, player-identification model, labelling result and router events). After a brain halt the subject is `[Video pipeline] BRAIN UNAVAILABLE - run again after <time> - logs attached` and the body starts with the halt report. `build/timeline.json` `_planner` now also holds `model_used`, `brain_models`, `slot`, and each failed attempt carries `http`, `message`, `state`, `at`, `basis`.
+- **Limits worth knowing**: identify and labelling use the same Gemini project quota as the planner, so a run that labels many shots on 3.8-flash / 3.6-flash can use up what the planner needs. A run with failed labelling still ends as SUCCESS WITH WARNINGS (content-blind); only the planner is strict.
+- Exit codes of `script_planner.py`: 0 ok, 2 setup, 3 needs more source, 4 no valid plan (non-strict), 5 brain unavailable (strict).
+- Test: `python -m unittest discover -s tests -p test_brain_rule.py` (29).
+
