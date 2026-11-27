@@ -222,11 +222,12 @@ class TestGeminiChain(unittest.TestCase):
                                         sleep=self.sleeps.append)
         return plan, rep, calls
 
-    def test_chain_is_exactly_the_ten_requested_models_in_order(self):
+    def test_chain_is_exactly_the_requested_models_in_order(self):
         self.assertEqual(sp.MODEL_FALLBACK_CHAIN, [
-            "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
-            "gemini-3-flash-preview", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash-lite",
-            "gemini-2.5-flash-preview", "gemini-2.0-flash-lite"])
+            "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen", "gemini-3.1-flash-lite",
+            "gemini-3-flash-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro",
+            "gemini-2.5-flash-lite", "gemini-2.5-flash-preview", "gemini-2.0-flash-lite", "gemma-4-31b-it",
+            "gemma-4-26b-a4b-it", "gemini-flash-latest", "gemini-flash-lite-latest"])
 
     def test_primary_wins_when_healthy(self):
         plan, rep, calls = self.run_chain(lambda m, n, p: self.valid)
@@ -242,11 +243,13 @@ class TestGeminiChain(unittest.TestCase):
                 raise TimeoutError("read timed out")
             if m == "gemini-3.5-flash-lite":
                 raise FakeAPIError(429, "RESOURCE_EXHAUSTED")
+            if m == "gemini-4-hydrogen":
+                raise FakeAPIError(504, "deadline exceeded")
             if m == "gemini-3.1-flash-lite":
                 raise FakeAPIError(404, "model not found")
             return self.valid
         plan, rep, calls = self.run_chain(behave)
-        self.assertEqual(calls[:5], ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite",
+        self.assertEqual(calls[:6], ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen",
                                      "gemini-3.1-flash-lite", "gemini-3-flash-preview"])
         self.assertEqual(rep["model_used"], "gemini-3-flash-preview")
 
@@ -314,8 +317,11 @@ class TestGeminiChain(unittest.TestCase):
             self.assertEqual(type(sp.make_client()).__name__, "Client")
             from google.genai import types
             cfg = types.GenerateContentConfig(system_instruction="x", response_mime_type="application/json",
-                                              temperature=0.3, max_output_tokens=16384,
-                                              http_options=types.HttpOptions(timeout=75000))
+                                              temperature=0.3, max_output_tokens=32768,
+                                              http_options=types.HttpOptions(timeout=sp.REQUEST_TIMEOUT_S * 1000))
+            for m in ("gemini-3.8-flash", "gemma-4-31b-it"):                 # the exact kwargs call_gemini sends, per model kind
+                _, kw = sp.call_config(m, "x", "y")
+                types.GenerateContentConfig(**kw, http_options=types.HttpOptions(timeout=sp.REQUEST_TIMEOUT_S * 1000))
             self.assertEqual(cfg.response_mime_type, "application/json")
         finally:
             os.environ.pop("GEMINI_API_KEY", None)
