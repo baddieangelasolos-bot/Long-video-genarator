@@ -1,7 +1,7 @@
 """
-v4 brain rule tests.  Run:  python -m unittest discover -s tests -p test_brain_rule.py
+v4/v5 brain rule tests.  Run:  python -m unittest discover -s tests -p test_brain_rule.py
 
-Gemini is MOCKED. What is proven: only the first 3 chain models plan; a daily 429 / 503 / no key in strict mode stops with exit 5
+Gemini is MOCKED. What is proven: only the brain chain plans (v5: the whole chain, master template in the prompt); a daily 429 / 503 / no key in strict mode stops with exit 5
 and a halt report (no offline video); times are labelled exact / safe / suggested honestly; the log mail names the planning model.
 """
 import io
@@ -48,10 +48,16 @@ OVERLOAD_503 = "503 UNAVAILABLE. This model is currently experiencing high deman
 
 
 class TestChainStays(unittest.TestCase):
-    def test_full_chain_unchanged_and_brain_is_its_first_three(self):
-        self.assertEqual(len(sp.MODEL_FALLBACK_CHAIN), 10)
-        self.assertEqual(sp.MODEL_FALLBACK_CHAIN[:4], ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"])
-        self.assertEqual(sp.BRAIN_MODELS, ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"])
+    def test_v5_brain_is_the_whole_chain_and_old_order_is_kept(self):
+        v4 = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3-flash-preview",
+              "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash-lite", "gemini-2.5-flash-preview", "gemini-2.0-flash-lite"]
+        chain = sp.MODEL_FALLBACK_CHAIN
+        self.assertEqual([m for m in chain if m in v4], v4)                      # new names added, old ones never reordered
+        self.assertEqual(chain[0], "gemini-3.8-flash")                           # primary unchanged
+        for m in ("gemini-4-hydrogen", "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-flash-latest", "gemini-flash-lite-latest"):
+            self.assertIn(m, chain)
+        self.assertEqual(len(chain), len(set(chain)))
+        self.assertEqual(sp.BRAIN_MODELS, chain)
 
 
 class TestTimes(unittest.TestCase):
@@ -77,6 +83,9 @@ class TestTimes(unittest.TestCase):
         self.assertIn("2026-11-22 08:00 UTC", s)
         self.assertIn("2026-11-22 00:00 PST", s)
         self.assertIn("in 20 h 00 min", s)
+        self.assertTrue(s.startswith("2026-11-22 14:00 Dhaka time = "))           # owner's time zone first (UTC+6)
+        self.assertEqual(bg.short_when(datetime(2026, 11, 26, 7, 56, tzinfo=UTC)), "2026-11-26 13:56 Dhaka (07:56 UTC)")
+        self.assertEqual(bg.short_when(datetime(2026, 11, 26, 20, 30, tzinfo=UTC)), "2026-11-27 02:30 Dhaka (20:30 UTC)")   # next day in Dhaka
 
 
 class TestErrorReading(unittest.TestCase):
@@ -129,12 +138,12 @@ def run_chain(behaviour, models=None, sleeps=None, clock=lambda: NOW):
 
 
 class TestBrainChain(unittest.TestCase):
-    def test_only_three_models_are_ever_asked(self):
+    def test_only_brain_models_are_ever_asked(self):
         def behave(m, valid):
             raise Err(503, OVERLOAD_503)
         plan, rep, calls, sleeps = run_chain(behave)
         self.assertIsNone(plan)
-        self.assertEqual(set(calls), set(sp.BRAIN_MODELS))              # never a 4th model
+        self.assertEqual(set(calls), set(sp.BRAIN_MODELS))              # never a model outside the brain chain
         self.assertEqual(calls.count("gemini-3.8-flash"), 3)           # three passes
         self.assertIn(20.0, sleeps)
         self.assertIn(60.0, sleeps)
@@ -152,7 +161,7 @@ class TestBrainChain(unittest.TestCase):
 
         def behave(m, valid):
             seen["n"] += 1
-            if seen["n"] <= 3:
+            if seen["n"] <= len(sp.BRAIN_MODELS):                       # every model hits the minute limit once
                 raise Err(429, MINUTE_429)
             return valid
         plan, rep, calls, sleeps = run_chain(behave)
@@ -188,8 +197,9 @@ class TestHalt(unittest.TestCase):
         info = bg.summarize(rep["attempts"], sp.BRAIN_MODELS, [], NOW)
         self.assertEqual((info["cause"], info["basis"]), ("quota", "exact"))
         self.assertEqual(info["retry_at"], "2026-11-22T08:00:00+00:00")
-        self.assertEqual(info["subject_when"], "2026-11-22 08:00 UTC")
-        self.assertIn("RUN THE WORKFLOW AGAIN AFTER: 2026-11-22 08:00 UTC = 2026-11-22 00:00 PST (Pacific), in 20 h 00 min", info["text"])
+        self.assertEqual(info["subject_when"], "2026-11-22 14:00 Dhaka (08:00 UTC)")
+        self.assertIn("RUN THE WORKFLOW AGAIN AFTER: 2026-11-22 14:00 Dhaka time = 2026-11-22 08:00 UTC = 2026-11-22 00:00 PST (Pacific), "
+                      "in 20 h 00 min", info["text"])
 
     def test_earliest_model_time_is_used(self):
         att = [{"model": "gemini-3.8-flash", "result": "quota", **bg.describe_error("quota", Err(429, DAILY_429), NOW)},
@@ -288,7 +298,7 @@ class TestLogMail(unittest.TestCase):
                                                                {"model": "gemini-3.6-flash", "result": "ok"}]}}}
         subj, body = self.run_mail({"build/timeline.json": tl, "build.log": "x", "alerts.log": ""})
         self.assertEqual(subj, "[Video pipeline] Run logs attached (SUCCESS)")
-        self.assertIn("Model that planned this video: gemini-3.6-flash (planning slot 2 of 3", body)
+        self.assertIn(f"Model that planned this video: gemini-3.6-flash (planning slot 2 of {len(sp.BRAIN_MODELS)}", body)
         self.assertIn("gemini-3.8-flash: busy or timed out (HTTP 503) -> gemini-3.6-flash: valid plan", body)
 
     def test_old_timeline_without_new_fields_still_works(self):
@@ -300,13 +310,85 @@ class TestLogMail(unittest.TestCase):
         info = bg.summarize([{"model": m, "result": "quota", **bg.describe_error("quota", Err(429, DAILY_429), NOW)} for m in sp.BRAIN_MODELS],
                             sp.BRAIN_MODELS, [], NOW)
         subj, body = self.run_mail({"analysis/brain_unavailable.json": info, "build.log": "x", "alerts.log": ""}, job="failure", outcome="failure")
-        self.assertEqual(subj, "[Video pipeline] BRAIN UNAVAILABLE - run again after 2026-11-22 08:00 UTC - logs attached")
+        self.assertEqual(subj, "[Video pipeline] BRAIN UNAVAILABLE - run again after 2026-11-22 14:00 Dhaka (08:00 UTC) - logs attached")
         self.assertTrue(body.startswith("THE GEMINI BRAIN IS UNAVAILABLE"))
 
     def test_offline_planner_is_called_out(self):
         tl = {"_planner": {"planner": "offline_safe_mode", "model_chain_report": {}}}
         _, body = self.run_mail({"build/timeline.json": tl, "build.log": "x", "alerts.log": ""})
         self.assertIn("OFFLINE planner", body)
+
+
+class TestV5Brain(unittest.TestCase):
+    """v5 (owner, 26 Nov 2026): master template in the prompt, longer chains, Gemma support, planning time budget."""
+    def test_prompt_carries_the_whole_master_template(self):
+        c = tp.ctx()
+        system, user = sp.build_prompt(c)
+        self.assertIn("MASTER_TEMPLATE", system)
+        self.assertIn("MASTER_TEMPLATE", user)
+        self.assertIn(json.dumps(c["template"], separators=(",", ":"), ensure_ascii=False), user)
+
+    def test_gemma_gets_no_json_mode_and_no_system_instruction(self):
+        contents, cfg = sp.call_config("gemma-4-31b-it", "SYS", "USER")
+        self.assertEqual(contents, "SYS\n\nUSER")
+        self.assertNotIn("response_mime_type", cfg)
+        self.assertNotIn("system_instruction", cfg)
+        contents, cfg = sp.call_config("gemini-4-hydrogen", "SYS", "USER")
+        self.assertEqual((contents, cfg["response_mime_type"], cfg["system_instruction"]), ("USER", "application/json", "SYS"))
+        self.assertEqual(sp.parse_json('Here is the plan:\n{"timeline": []}\nDone.'), {"timeline": []})
+
+    def test_time_budget_stops_the_chain(self):
+        t = {"now": 0.0}
+
+        def behave(m, valid):
+            t["now"] += 600                                              # every call "takes" 10 minutes
+            raise Err(503, OVERLOAD_503)
+        c = tp.ctx()
+        calls = []
+
+        def caller(client, model, system, prompt):
+            calls.append(model)
+            return behave(model, None)
+        plan, rep = sp.plan_with_gemini(c, tp.FakeClient(sp.MODEL_FALLBACK_CHAIN), sp.BRAIN_MODELS, caller=caller,
+                                        sleep=lambda s: None, clock=lambda: NOW, budget_s=1800, monotonic=lambda: t["now"])
+        self.assertIsNone(plan)
+        self.assertEqual(len(calls), 4)                                  # 0, 10, 20, 30 min asked; the 5th is past 30 min
+        self.assertTrue(rep.get("budget_exhausted"))
+        info = bg.summarize(rep["attempts"], sp.BRAIN_MODELS, [], NOW)
+        self.assertIn("not tried", info["text"])
+
+    def test_halt_mail_lists_not_served_models_on_one_line(self):
+        att = [{"model": "gemini-3.8-flash", "result": "transient", **bg.describe_error("transient", Err(503, OVERLOAD_503), NOW)}]
+        info = bg.summarize(att, sp.BRAIN_MODELS, ["gemini-1.5-flash", "gemini-1.5-pro"], NOW)
+        self.assertIn(f"These {len(sp.BRAIN_MODELS)} models plan the video script with the master template", info["text"])
+        self.assertIn("Not served for this API key (skipped, waiting will not change this): gemini-1.5-flash, gemini-1.5-pro", info["text"])
+        self.assertNotIn(" 9. gemini-1.5-flash", info["text"])
+
+
+class TestV5Router(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "autonomy"))
+        import gemini_router
+        self.g = gemini_router
+
+    def test_free_models_first_paid_only_last_gemma_allowed(self):
+        ids = ["gemini-4-argon", "gemini-4-carbon", "gemini-4-neon", "gemini-3.1-pro-preview", "gemini-4-hydrogen", "gemini-3.8-flash",
+               "gemini-3.6-flash", "gemini-3-flash-preview", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it",
+               "gemma-4-26b-a4b-it", "gemma-3-27b-it", "gemini-3.8-flash-tts", "gemini-decision-1", "gemini-embedding-2"]
+        v = self.g.rank(ids, "vision")
+        self.assertEqual(v[:4], ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3-flash-preview", "gemini-4-hydrogen"])
+        self.assertIn("gemma-4-31b-it", v)
+        for bad in ("gemma-3-27b-it", "gemini-3.8-flash-tts", "gemini-decision-1", "gemini-embedding-2"):
+            self.assertNotIn(bad, v)
+        paid = [m for m in v if self.g.PAID_ONLY.search(m)]
+        self.assertEqual(v[-len(paid):], paid)                           # paid-only models come after every free one
+        self.assertEqual(len(paid), 4)
+
+    def test_json_text_reads_json_out_of_plain_answers(self):
+        self.assertEqual(json.loads(self.g.json_text('Sure:\n```json\n{"a": 1}\n```')), {"a": 1})
+        self.assertEqual(json.loads(self.g.json_text('The answer is {"player": "X"} I think.')), {"player": "X"})
+        with self.assertRaises(ValueError):
+            self.g.json_text("no json here")
 
 
 if __name__ == "__main__":
