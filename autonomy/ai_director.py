@@ -55,7 +55,9 @@ def identify():
             try:
                 img=contact_sheet(s); txt,m=r.ask('vision',ID_PROMPT.format(n=12,fname=nm.get(s,s)),images=[img],json_mode=True)
                 if not txt: continue
-                j=json.loads(txt); pl=clean_name(j.get('player')); cl=clean_name(j.get('club')); w={'high':3,'medium':2,'low':1}.get(str(j.get('confidence','low')).lower(),1)
+                j=json.loads(txt)
+                if isinstance(j,list): j=next((x for x in j if isinstance(x,dict)),{})      # some models wrap the answer in a list
+                pl=clean_name(j.get('player')); cl=clean_name(j.get('club')); w={'high':3,'medium':2,'low':1}.get(str(j.get('confidence','low')).lower(),1)
                 detail.append(dict(src=s,player=pl,club=cl,confidence=j.get('confidence'),evidence=str(j.get('evidence',''))[:120],model=m))
                 if pl: votes[pl]=votes.get(pl,0)+w
                 if cl: clubs[cl]=clubs.get(cl,0)+w

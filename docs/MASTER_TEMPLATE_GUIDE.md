@@ -5,7 +5,7 @@
 |---|---|
 | `config/master_rendering_template.json` | Permanent rulebook + schema + measured pacing from the reference edit. The only place numbers live. |
 | `scripts/timeline_core.py` | The sandbox: probes media, computes section budgets, validates, repairs. Shared by planner and renderer. |
-| `scripts/script_planner.py` | Gemini fills the timeline. Planning uses ONLY the 3 brain models (first 3 of the 10-model chain). Every answer is repaired + validated. In the workflow (`--strict-brain`) there is no offline fallback: see v4. |
+| `scripts/script_planner.py` | Gemini fills the timeline with the whole master template in the prompt. v5: the brain is the whole 17-name chain (see v5). Every answer is repaired + validated. In the workflow (`--strict-brain`) there is no offline fallback: see v4. |
 | `scripts/brain_guard.py` | v4: reads Gemini errors, computes when a model is usable again, builds the BRAIN UNAVAILABLE report. |
 | `scripts/classify_shots.py` | Gemini labels the pipeline's contact-sheet rows with the template's shot types and writes `analysis/shot_catalog.json`. |
 | `scripts/comp_rules.py`, `catalog_tools.py`, `dup_scan.py`, `offline_planner.py`, `plan_report.py` | v3: composition rules, balanced prompt sample, repeated-footage scan, no-AI planner, footage and plan report mail. |
@@ -31,7 +31,7 @@ The master path is ON by default when `config/master_rendering_template.json` ex
 prepare > fetch > inventory > identify > scan > plan > master_plan > master_render > qa > verify_output > export
 ```
 - `plan`: `shots.py` + `shots2.py` (cuts and contact sheets), then `classify_shots.py` (Gemini labels, repo router with real model ids).
-- `master_plan`: `script_planner.py --strict-brain` (3 brain models, validated, no offline fallback). Exit 3 becomes a HALTED mail "NEEDS MORE SOURCE VIDEO"; exit 5 becomes a HALTED mail "Gemini brain unavailable - run again after <time>" (v4).
+- `master_plan`: `script_planner.py --strict-brain` (brain chain, validated, no offline fallback). Exit 3 becomes a HALTED mail "NEEDS MORE SOURCE VIDEO"; exit 5 becomes a HALTED mail "Gemini brain unavailable - run again after <time>" (v4).
 - `master_render`: `render_video.py --no-beats`, writes `build/<Player>_Highlights.mp4` and `pipeline/edl.json` (for `qa.py`); config fps is set to 60.
 - Skipped in master mode: beat grid, style, style_ai, known-good replay, edl, watermark, cards, grade, old render, assemble.
 - The old `_guard` min-clip / wide-share checks are replaced by the template validator (the owner template allows a 0.6 s opener).
@@ -76,4 +76,12 @@ Read-only token, `GEMINI_API_KEY` only in the pipeline step, owner-only job, pub
 - **Limits worth knowing**: identify and labelling use the same Gemini project quota as the planner, so a run that labels many shots on 3.8-flash / 3.6-flash can use up what the planner needs. A run with failed labelling still ends as SUCCESS WITH WARNINGS (content-blind); only the planner is strict.
 - Exit codes of `script_planner.py`: 0 ok, 2 setup, 3 needs more source, 4 no valid plan (non-strict), 5 brain unavailable (strict).
 - Test: `python -m unittest discover -s tests -p test_brain_rule.py` (29).
+
+## v5 (owner, 26 Nov 2026: master template in the prompt, longer fallback chains, Dhaka time)
+- **Master template to the brain**: `build_prompt` now starts the user prompt with `MASTER_TEMPLATE`: the complete `config/master_rendering_template.json` (compact JSON, unchanged), and the system instruction tells the model to follow it. The template file itself was not changed. One line was added to `SECTION_BUDGET_S`: code rejects a section more than 35% off its budget (the v4 test run failed on that).
+- **Planner (brain) chain** = `MODEL_FALLBACK_CHAIN`, all 17 names, in order; `BRAIN_MODELS` is the whole chain. The v4 names keep their order; new names: `gemini-4-hydrogen` (slot 4), `gemini-2.5-pro`, `gemini-2.5-flash`, `gemma-4-31b-it`, `gemma-4-26b-a4b-it`, `gemini-flash-latest`, `gemini-flash-lite-latest`. Names the key does not serve are skipped without a call. Every answer must still pass the template rules; if none does, the run stops (exit 5) as in v4.
+- **Planner call**: 180 s per request (v4: 75 s, and Google answered 504 DEADLINE_EXCEEDED right at that limit), up to 32768 output tokens. Gemma models get the system text on top of the prompt and no JSON mode; `parse_json` reads the JSON out of their text. The whole planning step has a time budget: `PLANNER_BUDGET_MIN` (default 45); models not reached in time are reported as not tried.
+- **Router** (identify, style, labelling, Mechanic consult): up to 16 tiers (`GEMINI_MAX_TIERS`). Order: `USER_PRIORITY` (v4 order kept, `gemini-4-hydrogen` added at slot 4, then 3.1-flash-lite, 2.5-flash-lite, the two Gemma 4 models and the two rolling aliases), then other discovered models newest first, then paid-only models (`PAID_ONLY`: gemini-4-carbon/argon/neon, 3.1-pro, pro-latest, customtools) last. A 429 with `limit: 0` (not in the free tier) cools that model for 6 h. Gemma 4 is allowed (older Gemma, TTS, live, decision, embedding models stay excluded).
+- **Dhaka time**: every time in the halt mail and its subject is shown in Dhaka time (UTC+6) first, then UTC and Pacific, e.g. `2026-11-26 13:56 Dhaka (07:56 UTC)`.
+- Test: `python -m unittest tests.test_brain_rule` (35).
 
