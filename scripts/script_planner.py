@@ -27,13 +27,14 @@ import timeline_core as core  # noqa: E402
 
 log = logging.getLogger("planner")
 
-# Owner's ordered chain (v5). The v4 names keep their order; the new free-tier names (*) are added without reordering the old
-# ones. Names the API does not serve for this key are skipped without a call (discover_models).
+# Owner's ordered chain (v5.1). The v4 names keep their order; the new free-tier names (*) are added without reordering the old
+# ones. v5.1 (owner, 28 Nov 2026): gemini-4-hydrogen, the strongest free model, is the primary.
+# Names the API does not serve for this key are skipped without a call (discover_models).
 MODEL_FALLBACK_CHAIN = [
-    "gemini-3.8-flash",          # primary
+    "gemini-4-hydrogen",         # * primary (v5.1): strongest free model in the owner's model list (Nov 2026)
+    "gemini-3.8-flash",          # primary until v5
     "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
-    "gemini-4-hydrogen",         # * strongest free model in the owner's model list (Nov 2026)
     "gemini-3.1-flash-lite",
     "gemini-3-flash-preview",
     "gemini-2.5-pro",            # * legacy: only for older keys (Google routes it to gemini-3.8-flash from 1 Dec 2026)
