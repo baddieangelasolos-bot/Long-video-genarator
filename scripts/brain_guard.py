@@ -2,9 +2,11 @@
 """
 brain_guard.py - the "brain rule" for the master planning job (v4). Pure functions, stdlib only.
 
-Owner rule: the video script/plan is made ONLY by the 3 best Gemini models (primary + 2 fallbacks). If none of the three can
-plan (quota used up, overloaded, not served, no key), the workflow STOPS and mails the owner when to run it again. No
-offline / low-quality fallback video is made. The other Gemini jobs (identify, labelling) keep their own longer chains.
+Owner rule: the video script/plan is made ONLY by the Gemini brain chain (v5: the whole planner chain in
+script_planner.MODEL_FALLBACK_CHAIN, primary first). If no model of the chain can make a plan that passes the master template
+rules (quota used up, overloaded, not served, no key), the workflow STOPS and mails the owner when to run it again. No
+offline / low-quality fallback video is made. The other Gemini jobs (identify, labelling) keep their own router chains.
+Times in the mails are shown in Dhaka time (the owner's time zone, UTC+6, no daylight saving) first, then UTC and Pacific.
 
 What this module decides:
   * describe_error()  - turn one failed Gemini call into a record with HTTP code, short message, retry hint, daily flag and
@@ -20,11 +22,12 @@ import re
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Any
 
-BRAIN_SIZE = 3                   # primary + 2 fallbacks
+BRAIN_SIZE = 3                   # v4 value, kept for old callers; v5 plans with the whole chain (len(brain) is used everywhere)
 OVERLOAD_SUGGEST_MIN = 30        # suggested wait after 503 / timeouts (a suggestion, not a Google time)
 UNKNOWN_QUOTA_TRY_MIN = 10       # earliest sensible retry when Google names no quota type and no retry time
 
 PACIFIC = "America/Los_Angeles"
+DHAKA = timezone(timedelta(hours=6))     # Bangladesh: UTC+6 all year (no daylight saving since 2009)
 
 
 def utcnow() -> datetime:
@@ -79,10 +82,15 @@ def daily_reset(now_utc: datetime) -> datetime:
         return local_mid + timedelta(hours=8)
 
 
+def to_dhaka(utc_dt: datetime) -> datetime:
+    return utc_dt.astimezone(DHAKA)
+
+
 def fmt_when(utc_dt: datetime, now_utc: datetime | None = None) -> str:
-    """'2026-11-22 08:00 UTC = 2026-11-22 00:00 PST (Pacific), in 5 h 12 min'."""
+    """'2026-11-22 14:00 Dhaka time = 2026-11-22 08:00 UTC = 2026-11-22 00:00 PST (Pacific), in 5 h 12 min'."""
     loc, abbr = to_pacific(utc_dt)
-    s = f"{utc_dt.strftime('%Y-%m-%d %H:%M')} UTC = {loc.strftime('%Y-%m-%d %H:%M')} {abbr} (Pacific)"
+    s = (f"{to_dhaka(utc_dt).strftime('%Y-%m-%d %H:%M')} Dhaka time = {utc_dt.strftime('%Y-%m-%d %H:%M')} UTC = "
+         f"{loc.strftime('%Y-%m-%d %H:%M')} {abbr} (Pacific)")
     if now_utc is not None:
         secs = int((utc_dt - now_utc).total_seconds())
         if secs > 0:
@@ -94,7 +102,8 @@ def fmt_when(utc_dt: datetime, now_utc: datetime | None = None) -> str:
 
 
 def short_when(utc_dt: datetime) -> str:
-    return utc_dt.strftime("%Y-%m-%d %H:%M UTC")
+    """'2026-11-22 14:00 Dhaka (08:00 UTC)' - used in the mail subject and the per-model lines."""
+    return f"{to_dhaka(utc_dt).strftime('%Y-%m-%d %H:%M')} Dhaka ({utc_dt.astimezone(timezone.utc).strftime('%H:%M')} UTC)"
 
 
 # --------------------------------------------------------------------------- #
@@ -183,7 +192,7 @@ _STATE_TEXT = {
     "invalid_plan": "answered, but the plan broke the template rules",
     "other_error": "unexpected error",
     "not_served": "not served for this API key",
-    "not_tried": "not tried (no Gemini client)",
+    "not_tried": "not tried (no Gemini client, or the planning time budget was used up first)",
 }
 _BASIS_TEXT = {
     "exact": "EXACT: taken from Google (retry hint in the error, or the documented daily reset at midnight Pacific time).",
@@ -205,7 +214,7 @@ def _row(model: str, a: dict | None, state: str | None = None) -> dict:
 
 
 def summarize(attempts: list[dict], brain: list[str], not_served: list[str], now_utc: datetime, key_missing: bool = False) -> dict:
-    """One halt report for the three brain models. Returns a dict with 'text' (the mail body part), 'subject_when', 'rows'."""
+    """One halt report for the brain chain. Returns a dict with 'text' (the mail body part), 'subject_when', 'rows'."""
     last: dict[str, dict] = {}
     for a in attempts:
         if a.get("model") in brain and a.get("result") != "ok":
@@ -226,14 +235,19 @@ def summarize(attempts: list[dict], brain: list[str], not_served: list[str], now
     elif pick is not None:
         cause = {"quota_daily": "quota", "quota_minute": "quota", "quota_unknown": "quota", "overload": "overload"}[pick["state"]]
         reason = _STATE_TEXT[pick["state"]]
-    elif states <= {"invalid_plan"}:
-        cause, reason = "invalid_plan", "all three answered, but no answer passed the template rules (a new run asks again)"
+    elif "invalid_plan" in states:
+        cause, reason = "invalid_plan", "every model that answered broke the master template rules (a new run asks again)"
     else:
-        cause, reason = "key_or_model", "none of the three is usable with this API key (waiting will not fix this)"
+        cause, reason = "key_or_model", "none of the brain models is usable with this API key (waiting will not fix this)"
 
+    n = len(brain)
     L = ["THE GEMINI BRAIN IS UNAVAILABLE. NO VIDEO WAS MADE, ON PURPOSE (your rule: no low-quality fallback video).",
-         "Only these 3 models plan the video script (primary + 2 fallbacks):"]
+         f"These {n} models plan the video script with the master template, in this order (primary + {n - 1} fallbacks):"]
+    skipped = []
     for i, r in enumerate(rows, 1):
+        if r["state"] == "not_served":
+            skipped.append(r["model"])
+            continue
         line = f" {i}. {r['model']}: {_STATE_TEXT.get(r['state'], r['state'])}"
         if r.get("http"):
             line += f" [HTTP {r['http']}]"
@@ -241,6 +255,8 @@ def summarize(attempts: list[dict], brain: list[str], not_served: list[str], now
             lead = {"exact": "usable again at", "safe": "safe to retry after", "suggested": "suggested retry after (not a Google time)"}.get(r.get("basis"), "usable again about")
             line += f"; {lead} {short_when(datetime.fromisoformat(r['at']))}"
         L.append(line)
+    if skipped:
+        L.append(" Not served for this API key (skipped, waiting will not change this): " + ", ".join(skipped))
     out: dict[str, Any] = {"cause": cause, "reason": reason, "brain_models": list(brain), "rows": rows, "key_missing": key_missing,
                            "created_utc": now_utc.isoformat(), "retry_at": None, "basis": None, "subject_when": "see the mail"}
     if pick is not None:
@@ -249,7 +265,7 @@ def summarize(attempts: list[dict], brain: list[str], not_served: list[str], now
         L += ["", "RUN THE WORKFLOW AGAIN AFTER: " + fmt_when(at, now_utc), _BASIS_TEXT[pick["basis"]]]
         if pick["basis"] == "safe" and pick.get("try_at"):
             L.append("Earliest worth trying (only if it was a per-minute limit): " + short_when(datetime.fromisoformat(pick["try_at"])) + ".")
-        L.append("Model used for the time above: " + pick["model"] + ". Any one of the 3 being back is enough to plan.")
+        L.append("Model used for the time above: " + pick["model"] + ". Any one of these models being back is enough to plan.")
         sure = [r for r in timed if r["basis"] in ("exact", "safe")]
         if pick["basis"] == "suggested" and sure:
             s0 = min(sure, key=lambda r: r["at"])
