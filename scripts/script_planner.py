@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 script_planner.py - source clips + music + master template -> a verified timeline.json.
-Gemini (google-genai, 10-model chain, JSON-only output) proposes; timeline_core repairs and validates every answer;
-if every model fails a deterministic offline planner builds the timeline.
+Gemini (google-genai, the brain chain below, JSON-only output) proposes with the WHOLE master template in the prompt;
+timeline_core repairs and validates every answer; only outside strict mode, if every model fails, a deterministic offline
+planner builds the timeline.
 Exit codes: 0 ok | 2 setup/usage error | 3 NEEDS MORE SOURCE VIDEO | 4 no valid plan could be made |
-            5 BRAIN UNAVAILABLE (only with --strict-brain: the 3 brain models could not plan; no offline video is made, a halt report is written)
+            5 BRAIN UNAVAILABLE (only with --strict-brain: no brain model could plan; no offline video is made, a halt report is written)
 """
 from __future__ import annotations
 
@@ -26,24 +27,33 @@ import timeline_core as core  # noqa: E402
 
 log = logging.getLogger("planner")
 
-# Owner's ordered chain; names the API does not serve for this key are skipped (discover_models).
+# Owner's ordered chain (v5). The v4 names keep their order; the new free-tier names (*) are added without reordering the old
+# ones. Names the API does not serve for this key are skipped without a call (discover_models).
 MODEL_FALLBACK_CHAIN = [
-    "gemini-3.8-flash",
+    "gemini-3.8-flash",          # primary
     "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
+    "gemini-4-hydrogen",         # * strongest free model in the owner's model list (Nov 2026)
     "gemini-3.1-flash-lite",
     "gemini-3-flash-preview",
+    "gemini-2.5-pro",            # * legacy: only for older keys (Google routes it to gemini-3.8-flash from 1 Dec 2026)
+    "gemini-2.5-flash",          # * legacy: only for older keys (Google routes it to gemini-3.5-flash-lite from 1 Dec 2026)
     "gemini-1.5-flash",
     "gemini-1.5-pro",
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash-preview",
     "gemini-2.0-flash-lite",
+    "gemma-4-31b-it",            # * open model hosted free by Google (no JSON mode / system instruction needed, see call_gemini)
+    "gemma-4-26b-a4b-it",        # *
+    "gemini-flash-latest",       # * rolling alias: the newest free Flash
+    "gemini-flash-lite-latest",  # * rolling alias: the newest free Flash-Lite
 ]
-# v4 brain rule: the video script/plan is made ONLY by the first 3 models of the chain (primary + 2 fallbacks). The full chain stays
-# defined (same order) for reference and tests; identify/labelling use their own router chains and are not affected.
-BRAIN_MODELS = MODEL_FALLBACK_CHAIN[:bg.BRAIN_SIZE]
+# v5 brain rule (owner, 26 Nov 2026): the video script/plan is made by the WHOLE chain above, in order. Every answer must still pass
+# the master template rules in timeline_core (that is the quality gate); if no model can, the run stops (exit 5) and no video is made.
+BRAIN_MODELS = list(MODEL_FALLBACK_CHAIN)
 EXIT_BRAIN_UNAVAILABLE = 5   # strict mode: none of the brain models could plan; nothing was written but the halt report
-REQUEST_TIMEOUT_S = 75     # per request; a hanging model must not eat the whole run
+REQUEST_TIMEOUT_S = 180    # per request. v4 used 75 s and Google answered 504 DEADLINE_EXCEEDED right at that limit, so a big plan needs more
+BRAIN_BUDGET_S = float(os.environ.get("PLANNER_BUDGET_MIN", "45")) * 60   # whole planning step; a stuck chain must not eat the run
 MAX_CATALOG_LINES = 360    # keeps the prompt small enough for lite models; the sample keeps every type and source (balanced_sample)
 
 
@@ -97,12 +107,17 @@ def build_prompt(ctx: dict, errors: list[str] | None = None, previous: str | Non
         "You are the edit planner for an automated football highlight generator. "
         "Reply with ONE JSON object of the form {\"timeline\": [...]} and nothing else: no prose, no markdown. "
         "You are a structured populator, not a writer: use only the schema keys, only the listed source files, "
-        "and only windows that exist. Obey the RULEBOOK exactly. If a rule cannot be met with the footage "
+        "and only windows that exist. The MASTER_TEMPLATE in the prompt is the owner's master rendering template: "
+        "follow it and the RULEBOOK exactly. If a rule cannot be met with the footage "
         "provided, skip the optional clip type instead of inventing footage."
     )
     lines = [
+        "MASTER_TEMPLATE (the owner's master rendering template, config/master_rendering_template.json, complete and "
+        "unchanged. Every rule, limit, schema and number below comes from it; if anything seems to disagree, the template wins): "
+        + json.dumps(tpl, separators=(",", ":"), ensure_ascii=False),
         f"TARGET_DURATION_S: {target}",
-        f"SECTION_BUDGET_S (sum must equal target): {json.dumps(budgets)}",
+        f"SECTION_BUDGET_S (sum must equal target; code rejects a section whose shots add up to more than 35% off its budget): "
+        f"{json.dumps(budgets)}",
         "SOURCES (the only files that exist): " + json.dumps(
             [{"file": k, "duration_s": round(v["duration"], 2), "fps": v["fps"]} for k, v in sources.items()]),
     ]
@@ -184,19 +199,30 @@ def classify_error(exc: BaseException) -> str:
     return "other"
 
 
+def is_open_model(model: str) -> bool:
+    """Gemma models on the Gemini API: Google has refused system instructions and JSON mode for them, so they get plain text."""
+    return model.startswith("gemma-")
+
+
+def call_config(model: str, system: str, prompt: str) -> tuple[str, dict]:
+    """(contents, config kwargs) for one call. Gemini: system instruction + JSON mode. Gemma: system text on top of the
+    prompt, no JSON mode (parse_json reads the JSON object out of the text), smaller output limit."""
+    if is_open_model(model):
+        return system + "\n\n" + prompt, dict(temperature=0.3, max_output_tokens=8192)
+    return prompt, dict(system_instruction=system,
+                        response_mime_type="application/json",   # forces syntactically valid JSON
+                        temperature=0.3,                          # low: we want rule-following, not creativity
+                        max_output_tokens=32768)                  # room for thinking tokens plus the plan
+
+
 def call_gemini(client: Any, model: str, system: str, prompt: str) -> str:
     """One generate_content call with JSON-only output. Returns raw text."""
     from google.genai import types
+    contents, cfg = call_config(model, system, prompt)
     resp = client.models.generate_content(
         model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system,
-            response_mime_type="application/json",   # forces syntactically valid JSON
-            temperature=0.3,                          # low: we want rule-following, not creativity
-            max_output_tokens=16384,
-            http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_S * 1000),
-        ),
+        contents=contents,
+        config=types.GenerateContentConfig(**cfg, http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_S * 1000)),
     )
     text = getattr(resp, "text", None)
     if not text:
@@ -227,13 +253,15 @@ def parse_json(text: str) -> dict:
 def plan_with_gemini(ctx: dict, client: Any, models: list[str], max_repairs: int = 1,
                      caller: Callable[[Any, str, str, str], str] = call_gemini,
                      sleep: Callable[[float], None] = time.sleep,
-                     clock: Callable[[], Any] = bg.utcnow) -> tuple[dict | None, dict]:
+                     clock: Callable[[], Any] = bg.utcnow, budget_s: float | None = None,
+                     monotonic: Callable[[], float] = time.monotonic) -> tuple[dict | None, dict]:
     """
     Walk the given models in order. Per model: ask once; if the answer fails validation, ask once more
     with the error list (max_repairs). Models that failed for busy/quota reasons get up to two more passes
     (after 20 s, then 60 s; longer if Google's own retry hint says so). A model whose DAILY quota is used up is not asked again.
     Returns (plan or None, report). Every failed attempt in report["attempts"] carries http, message, state and, when known,
     the time the model should be usable again (see brain_guard.describe_error).
+    budget_s caps the whole step (default BRAIN_BUDGET_S); models not reached in time are reported as not tried.
     """
     report: dict[str, Any] = {"attempts": [], "model_used": None}
     available = discover_models(client) if client is not None else None
@@ -246,11 +274,16 @@ def plan_with_gemini(ctx: dict, client: Any, models: list[str], max_repairs: int
         log.warning("None of the chain models is served for this key")
         return None, report
 
+    deadline = monotonic() + (BRAIN_BUDGET_S if budget_s is None else budget_s)
     todo = list(chain)
     for pass_no in (1, 2, 3):
         retry_later: list[str] = []
         pass_attempts: list[dict] = []
         for model in todo:
+            if monotonic() > deadline:
+                log.warning("Planning time budget (%.0f min) used up: %s not asked", (budget_s or BRAIN_BUDGET_S) / 60, model)
+                report["budget_exhausted"] = True
+                break
             errors: list[str] | None = None
             previous: str | None = None
             for attempt in range(1 + max_repairs):
@@ -288,7 +321,7 @@ def plan_with_gemini(ctx: dict, client: Any, models: list[str], max_repairs: int
                 report["attempts"].append({"model": model, "result": "invalid", "errors": errs[:5]})
                 errors, previous = errs, json.dumps(fixed)
         todo = [m for m in dict.fromkeys(retry_later)]
-        if not todo or pass_no == 3:
+        if not todo or pass_no == 3 or report.get("budget_exhausted"):
             break
         wait = bg.retry_wait(pass_attempts, pass_no + 1)
         log.info("Waiting %.0f s, then retrying %d busy model(s) (pass %d of 3)", wait, len(todo), pass_no + 1)
@@ -314,7 +347,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--no-ai", action="store_true", help="skip Gemini, use the offline planner only")
     ap.add_argument("--require-ai", action="store_true", help="fail (exit 4) instead of using the offline planner")
     ap.add_argument("--strict-brain", action="store_true",
-                    help="owner rule: if none of the 3 brain models can plan, stop (exit 5) and write the halt report; never use the offline planner")
+                    help="owner rule: if no brain model can plan, stop (exit 5) and write the halt report; never use the offline planner")
     ap.add_argument("--brain-report", default=None, help="where --strict-brain writes brain_unavailable.json (default: next to --out)")
     ap.add_argument("--max-repairs", type=int, default=1, help="re-asks per model after a rejected answer")
     ap.add_argument("--exclude", nargs="*", default=list(core.DEFAULT_EXCLUDE),
@@ -382,7 +415,7 @@ def main(argv: list[str] | None = None, client_factory: Callable[[], Any] = make
             log.warning("Could not create the Gemini client (%s: %s)", type(exc).__name__, bg.scrub(str(exc))[:120])
             client, key_missing = None, True
         if client is not None:
-            log.info("Brain models (primary + 2 fallbacks): %s", ", ".join(BRAIN_MODELS))
+            log.info("Brain models (primary + %d fallbacks, master template in the prompt): %s", len(BRAIN_MODELS) - 1, ", ".join(BRAIN_MODELS))
             plan, report = plan_with_gemini(ctx, client, BRAIN_MODELS, max_repairs=args.max_repairs, caller=call_gemini)
             if plan:
                 planner_name = f"gemini:{report['model_used']}"
