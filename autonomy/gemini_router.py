@@ -2,13 +2,15 @@
 """Gemini fallback router for the runner. Discovers REAL model ids from the API (names are never trusted),
 ranks up to MAX_TIERS tiers (v5: 16 = 1 primary + 15 fallbacks) and fails over on quota/rate/server errors. Never raises; returns (None,None) if every tier fails.
 Every failover is recorded in EVENTS so the Mechanic can put it in the alert email.
-v5 order: USER_PRIORITY (v4 names in their old order, new free-tier names added), then any other discovered model newest first,
+v5 order: USER_PRIORITY (v4 names in their old order, new free-tier names added; v5.1: gemini-4-hydrogen is the primary of every
+role, the Mechanic's 'reason' role included), then any other discovered model newest first,
 then the paid-only models (PAID_ONLY) last: a free key gets quota 0 there, so they are only worth a call when nothing else answers.
 Gemma models get no JSON mode (Google refuses it for them): the JSON is read out of their text answer."""
 import os, re, json, time, base64
 import requests
 BASE=os.environ.get('GEMINI_API_BASE','https://generativelanguage.googleapis.com/v1beta')
-USER_PRIORITY=['gemini-3.8-flash','gemini-3.6-flash','gemini-3-flash-preview','gemini-4-hydrogen','gemini-3.5-flash-lite','gemini-2.5-flash','gemini-2.5-pro',
+PRIMARY='gemini-4-hydrogen'      # v5.1 (owner, 28 Nov 2026): the strongest free model is tier 1 for every role
+USER_PRIORITY=[PRIMARY,'gemini-3.8-flash','gemini-3.6-flash','gemini-3-flash-preview','gemini-3.5-flash-lite','gemini-2.5-flash','gemini-2.5-pro',
                'gemini-3.1-flash-lite','gemini-2.5-flash-lite','gemma-4-31b-it','gemma-4-26b-a4b-it','gemini-flash-latest','gemini-flash-lite-latest']
 PAID_ONLY=re.compile(r'gemini-4-(carbon|argon|neon)|gemini-3\.1-pro|gemini-pro-latest|customtools',re.I)   # need a paid billing tier (owner's model list, Nov 2026)
 MAX_TIERS=int(os.environ.get('GEMINI_MAX_TIERS','16'))
@@ -43,6 +45,7 @@ def rank(ids,role='vision'):
     rest.sort(key=k); paid.sort(key=k); order=pri+rest
     if role=='reason': order=[m for m in order if '-pro' in m]+[m for m in order if '-pro' not in m]
     if role=='json': order=[m for m in order if 'lite' in m or 'flash' in m]+[m for m in order if not('lite' in m or 'flash' in m)]
+    if PRIMARY in order: order=[PRIMARY]+[m for m in order if m!=PRIMARY]      # the role reorders above never push the primary down
     return (order+paid)[:MAX_TIERS]
 class _Skip(Exception): pass
 def _call(model,prompt,images,json_mode,timeout,extra_parts=()):

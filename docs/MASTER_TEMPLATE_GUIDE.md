@@ -83,5 +83,8 @@ Read-only token, `GEMINI_API_KEY` only in the pipeline step, owner-only job, pub
 - **Planner call**: 180 s per request (v4: 75 s, and Google answered 504 DEADLINE_EXCEEDED right at that limit), up to 32768 output tokens. Gemma models get the system text on top of the prompt and no JSON mode; `parse_json` reads the JSON out of their text. The whole planning step has a time budget: `PLANNER_BUDGET_MIN` (default 45); models not reached in time are reported as not tried.
 - **Router** (identify, style, labelling, Mechanic consult): up to 16 tiers (`GEMINI_MAX_TIERS`). Order: `USER_PRIORITY` (v4 order kept, `gemini-4-hydrogen` added at slot 4, then 3.1-flash-lite, 2.5-flash-lite, the two Gemma 4 models and the two rolling aliases), then other discovered models newest first, then paid-only models (`PAID_ONLY`: gemini-4-carbon/argon/neon, 3.1-pro, pro-latest, customtools) last. A 429 with `limit: 0` (not in the free tier) cools that model for 6 h. Gemma 4 is allowed (older Gemma, TTS, live, decision, embedding models stay excluded).
 - **Dhaka time**: every time in the halt mail and its subject is shown in Dhaka time (UTC+6) first, then UTC and Pacific, e.g. `2026-11-26 13:56 Dhaka (07:56 UTC)`.
-- Test: `python -m unittest tests.test_brain_rule` (35).
+- Test: `python -m unittest tests.test_brain_rule` (36).
+
+## v5.1 (owner, 28 Nov 2026: Gemini 4 Hydrogen is the primary)
+- `gemini-4-hydrogen` (the strongest free model in the owner's model list) is now slot 1 of the brain chain (`MODEL_FALLBACK_CHAIN`) and tier 1 of every router role (`gemini_router.PRIMARY`): identify, style, labelling and the Mechanic consult (`reason`, where it now comes before the `-pro` models). Every other model keeps its order and moves down one place; `gemini-3.8-flash` is the first fallback. If the key does not serve Hydrogen, or it is busy, the next model takes over as before.
 
