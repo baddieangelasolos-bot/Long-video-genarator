@@ -53,7 +53,7 @@ class TestChainStays(unittest.TestCase):
               "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash-lite", "gemini-2.5-flash-preview", "gemini-2.0-flash-lite"]
         chain = sp.MODEL_FALLBACK_CHAIN
         self.assertEqual([m for m in chain if m in v4], v4)                      # new names added, old ones never reordered
-        self.assertEqual(chain[0], "gemini-3.8-flash")                           # primary unchanged
+        self.assertEqual(chain[:2], ["gemini-4-hydrogen", "gemini-3.8-flash"])   # v5.1: Hydrogen is the primary, 3.8-flash the first fallback
         for m in ("gemini-4-hydrogen", "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-flash-latest", "gemini-flash-lite-latest"):
             self.assertIn(m, chain)
         self.assertEqual(len(chain), len(set(chain)))
@@ -167,17 +167,17 @@ class TestBrainChain(unittest.TestCase):
         plan, rep, calls, sleeps = run_chain(behave)
         self.assertIsNotNone(plan)
         self.assertIn(43.0, sleeps)                                      # retryDelay 41 s + 2 s
-        self.assertEqual(rep["model_used"], "gemini-3.8-flash")
+        self.assertEqual(rep["model_used"], "gemini-4-hydrogen")
 
     def test_fallback_to_second_model_is_recorded_with_details(self):
         def behave(m, valid):
-            if m == "gemini-3.8-flash":
+            if m == "gemini-4-hydrogen":
                 raise Err(503, OVERLOAD_503)
             return valid
         plan, rep, calls, _ = run_chain(behave)
-        self.assertEqual(rep["model_used"], "gemini-3.6-flash")
+        self.assertEqual(rep["model_used"], "gemini-3.8-flash")
         first = rep["attempts"][0]
-        self.assertEqual((first["model"], first["result"], first["http"], first["state"]), ("gemini-3.8-flash", "transient", 503, "overload"))
+        self.assertEqual((first["model"], first["result"], first["http"], first["state"]), ("gemini-4-hydrogen", "transient", 503, "overload"))
 
 
 class TestHalt(unittest.TestCase):
@@ -263,7 +263,7 @@ class TestMainStrict(unittest.TestCase):
         valid = json.dumps(tp.good_plan(c))
 
         def fake(client, model, system, prompt):
-            if model == "gemini-3.8-flash":
+            if model == "gemini-4-hydrogen":
                 raise Err(503, OVERLOAD_503)
             return valid
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sp, "call_gemini", fake), \
@@ -271,7 +271,7 @@ class TestMainStrict(unittest.TestCase):
             rc = sp.main(self.base(tmp) + ["--strict-brain"], client_factory=lambda: tp.FakeClient(sp.MODEL_FALLBACK_CHAIN))
             self.assertEqual(rc, 0)
             pl = json.loads((Path(tmp) / "build" / "timeline.json").read_text())["_planner"]
-            self.assertEqual((pl["planner"], pl["model_used"], pl["slot"]), ("gemini:gemini-3.6-flash", "gemini-3.6-flash", 2))
+            self.assertEqual((pl["planner"], pl["model_used"], pl["slot"]), ("gemini:gemini-3.8-flash", "gemini-3.8-flash", 2))
             self.assertEqual(pl["brain_models"], sp.BRAIN_MODELS)
             self.assertEqual(pl["model_chain_report"]["attempts"][0]["state"], "overload")
 
@@ -376,13 +376,20 @@ class TestV5Router(unittest.TestCase):
                "gemini-3.6-flash", "gemini-3-flash-preview", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it",
                "gemma-4-26b-a4b-it", "gemma-3-27b-it", "gemini-3.8-flash-tts", "gemini-decision-1", "gemini-embedding-2"]
         v = self.g.rank(ids, "vision")
-        self.assertEqual(v[:4], ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3-flash-preview", "gemini-4-hydrogen"])
+        self.assertEqual(v[:4], ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3-flash-preview"])
         self.assertIn("gemma-4-31b-it", v)
         for bad in ("gemma-3-27b-it", "gemini-3.8-flash-tts", "gemini-decision-1", "gemini-embedding-2"):
             self.assertNotIn(bad, v)
         paid = [m for m in v if self.g.PAID_ONLY.search(m)]
         self.assertEqual(v[-len(paid):], paid)                           # paid-only models come after every free one
         self.assertEqual(len(paid), 4)
+
+    def test_hydrogen_is_tier_1_for_every_role(self):
+        ids = ["gemini-2.5-pro", "gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen", "gemini-4-carbon"]
+        for role in ("vision", "json", "reason"):
+            self.assertEqual(self.g.rank(ids, role)[0], "gemini-4-hydrogen", role)
+        self.assertEqual(self.g.rank(ids, "reason")[1], "gemini-2.5-pro")      # the pro-first rule still applies behind it
+        self.assertEqual(self.g.rank([m for m in ids if "hydrogen" not in m], "vision")[0], "gemini-3.8-flash")   # not served -> next
 
     def test_json_text_reads_json_out_of_plain_answers(self):
         self.assertEqual(json.loads(self.g.json_text('Sure:\n```json\n{"a": 1}\n```')), {"a": 1})
