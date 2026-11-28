@@ -224,15 +224,15 @@ class TestGeminiChain(unittest.TestCase):
 
     def test_chain_is_exactly_the_requested_models_in_order(self):
         self.assertEqual(sp.MODEL_FALLBACK_CHAIN, [
-            "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen", "gemini-3.1-flash-lite",
+            "gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
             "gemini-3-flash-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro",
             "gemini-2.5-flash-lite", "gemini-2.5-flash-preview", "gemini-2.0-flash-lite", "gemma-4-31b-it",
             "gemma-4-26b-a4b-it", "gemini-flash-latest", "gemini-flash-lite-latest"])
 
     def test_primary_wins_when_healthy(self):
         plan, rep, calls = self.run_chain(lambda m, n, p: self.valid)
-        self.assertEqual(calls, ["gemini-3.8-flash"])
-        self.assertEqual(rep["model_used"], "gemini-3.8-flash")
+        self.assertEqual(calls, ["gemini-4-hydrogen"])
+        self.assertEqual(rep["model_used"], "gemini-4-hydrogen")
         self.assertIsNotNone(plan)
 
     def test_walks_down_the_chain_on_errors(self):
@@ -249,22 +249,22 @@ class TestGeminiChain(unittest.TestCase):
                 raise FakeAPIError(404, "model not found")
             return self.valid
         plan, rep, calls = self.run_chain(behave)
-        self.assertEqual(calls[:6], ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen",
+        self.assertEqual(calls[:6], ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite",
                                      "gemini-3.1-flash-lite", "gemini-3-flash-preview"])
         self.assertEqual(rep["model_used"], "gemini-3-flash-preview")
 
     def test_models_not_served_for_the_key_are_skipped_without_a_call(self):
-        served = [m for m in sp.MODEL_FALLBACK_CHAIN if "1.5" not in m and "3.8" not in m]
+        served = [m for m in sp.MODEL_FALLBACK_CHAIN if "1.5" not in m and "hydrogen" not in m]
         plan, rep, calls = self.run_chain(lambda m, n, p: self.valid, served=served)
-        self.assertEqual(calls, ["gemini-3.6-flash"])
-        self.assertIn("gemini-3.8-flash", rep["not_served"])
+        self.assertEqual(calls, ["gemini-3.8-flash"])
+        self.assertIn("gemini-4-hydrogen", rep["not_served"])
 
     def test_fixable_mistakes_are_repaired_without_another_call(self):
         bad = json.loads(self.valid)
         bad["timeline"][2]["source_video_file"] = "invented_clip.mp4"     # ghost file -> dropped
         bad["timeline"][4]["duration"] = 99.0                             # absurd length -> clamped and refitted
         plan, rep, calls = self.run_chain(lambda m, n, p: json.dumps(bad))
-        self.assertEqual(calls, ["gemini-3.8-flash"])
+        self.assertEqual(calls, ["gemini-4-hydrogen"])
         self.assertTrue(any("unknown source" in r for r in rep["repairs"]))
         self.assertEqual(core.validate(plan, self.c)[0], [])
 
@@ -281,13 +281,13 @@ class TestGeminiChain(unittest.TestCase):
             self.assertIn("E-WIDE", prompt)
             return self.valid
         plan, rep, calls = self.run_chain(behave)
-        self.assertEqual(calls, ["gemini-3.8-flash", "gemini-3.8-flash"])
+        self.assertEqual(calls, ["gemini-4-hydrogen", "gemini-4-hydrogen"])
         self.assertIsNotNone(plan)
 
     def test_garbage_json_then_next_model(self):
         plan, rep, calls = self.run_chain(lambda m, n, p: "I am sorry, here is your plan: not json at all"
-                                          if m == "gemini-3.8-flash" else self.valid)
-        self.assertEqual(rep["model_used"], "gemini-3.6-flash")
+                                          if m == "gemini-4-hydrogen" else self.valid)
+        self.assertEqual(rep["model_used"], "gemini-3.8-flash")
 
     def test_everything_fails_returns_none(self):
         def behave(m, n, p):
