@@ -53,6 +53,10 @@ MODEL_FALLBACK_CHAIN = [
 # the master template rules in timeline_core (that is the quality gate); if no model can, the run stops (exit 5) and no video is made.
 BRAIN_MODELS = list(MODEL_FALLBACK_CHAIN)
 EXIT_BRAIN_UNAVAILABLE = 5   # strict mode: none of the brain models could plan; nothing was written but the halt report
+# v5.2: the google-genai SDK (3.x) talks to the v1 API by default. On this key the v1 listing had no gemini-3-flash-preview and no rolling
+# aliases, so the 27 Nov 2026 run skipped gemini-3-flash-preview, gemini-flash-latest and gemini-flash-lite-latest as
+# "not served" although v1beta (the router's API) serves them and two of them answered labelling. The planner now uses v1beta too.
+API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1beta")
 REQUEST_TIMEOUT_S = 180    # per request. v4 used 75 s and Google answered 504 DEADLINE_EXCEEDED right at that limit, so a big plan needs more
 BRAIN_BUDGET_S = float(os.environ.get("PLANNER_BUDGET_MIN", "45")) * 60   # whole planning step; a stuck chain must not eat the run
 MAX_CATALOG_LINES = 360    # keeps the prompt small enough for lite models; the sample keeps every type and source (balanced_sample)
@@ -169,7 +173,7 @@ def make_client() -> Any:
     from google import genai
     from google.genai import types
     key = os.environ["GEMINI_API_KEY"]  # KeyError is handled by the caller
-    return genai.Client(api_key=key, http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_S * 1000))
+    return genai.Client(api_key=key, http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_S * 1000, api_version=API_VERSION))
 
 
 def discover_models(client: Any) -> set[str] | None:
@@ -223,7 +227,7 @@ def call_gemini(client: Any, model: str, system: str, prompt: str) -> str:
     resp = client.models.generate_content(
         model=model,
         contents=contents,
-        config=types.GenerateContentConfig(**cfg, http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_S * 1000)),
+        config=types.GenerateContentConfig(**cfg, http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_S * 1000, api_version=API_VERSION)),
     )
     text = getattr(resp, "text", None)
     if not text:

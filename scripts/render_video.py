@@ -219,7 +219,9 @@ def concat_and_mux(segments: list[Path], music: str, out_path: Path, target_s: f
     listing.write_text("".join(f"file '{p.as_posix()}'\n" for p in segments), encoding="utf-8")
     a = spec["audio"]
     fade_at = max(0.0, target_s - a["fade_out_s"])
-    af = f"alimiter=limit={a['limiter']},afade=t=out:st={fade_at:.3f}:d={a['fade_out_s']}"
+    # level=disabled: FFmpeg's alimiter "auto level" is on by default and scales the limited signal back up to full scale,
+    # so limit=0.89 used to end at 0.0 dB (QA of the 27 Nov 2026 run: 32726 samples at 0 dB). Off, the peak stays at the limit.
+    af = f"alimiter=limit={a['limiter']}:level=disabled,afade=t=out:st={fade_at:.3f}:d={a['fade_out_s']}"
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-f", "concat", "-safe", "0", "-i", str(listing),
            "-i", music,

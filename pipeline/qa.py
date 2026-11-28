@@ -32,7 +32,9 @@ if sp: problems.append('possible hidden cuts (inspect sheets at these frames)')
 if A:
     vd=subprocess.run(['ffmpeg','-hide_banner','-i',v,'-vn','-af','volumedetect','-f','null','-'],capture_output=True,text=True).stderr
     mx=re.search(r'max_volume: (-?[\d.]+) dB',vd); h0=re.search(r'histogram_0db: (\d+)',vd); print('max_volume',mx and mx.group(1),'dB | samples at 0dB:',h0 and h0.group(1))
-    if mx and float(mx.group(1))>=-0.1 or (h0 and int(h0.group(1))>0): problems.append('audio at/near full scale (clipping risk)')
+    # v5.2: only a real full-scale peak counts. The template's limiter ceiling (0.89 = -1 dB) plus normal AAC overshoot always puts
+    # some samples in the 0 dB bin (above -1 dB) of loud music, so 'any sample there' was a permanent false alarm.
+    if mx and float(mx.group(1))>=-0.1: problems.append('audio at full scale (clipping risk)')
 # labelled contact sheets, 1 tile/second via accurate fast-seek
 ids=[]; 
 for c in EDL: ids+= [c['id']]*c['frames']
